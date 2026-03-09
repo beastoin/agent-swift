@@ -47,12 +47,6 @@ agent-swift snapshot -i
 # Tap an element
 agent-swift press @e3
 
-# Enter text
-agent-swift fill @e1 "hello world"
-
-# Take a screenshot
-agent-swift screenshot /tmp/screen.png
-
 # Check status
 agent-swift status
 
@@ -70,8 +64,6 @@ agent-swift disconnect
 | `status` | Show connection state |
 | `snapshot` | Capture element tree with refs (`-i` for interactive only) |
 | `press` | Tap element by ref (`@e1`) |
-| `fill` | Enter text into element by ref (`@e1 "text"`) |
-| `screenshot` | Capture app window screenshot |
 
 ## JSON output
 
