@@ -1,71 +1,117 @@
-# AGENTS.md — agent-swift loop
+# AGENTS.md — agent-swift
 
-Operating guide for AI agents working in the agent-swift build loop.
+Integration guide for AI agents using `agent-swift` to control native macOS apps via Accessibility (`AXUIElement`).
 
-## What this loop builds
+## What agent-swift is
 
-`agent-swift` — a native Swift CLI for AI agents to control macOS apps through Accessibility (`AXUIElement`) using the same `snapshot -> @ref -> action` workflow used by agent-flutter and agent-browser.
+`agent-swift` is a CLI automation interface for macOS apps.
+
+It provides a consistent workflow:
+
+1. Connect to an app
+2. Snapshot the UI tree to generate `@ref`s
+3. Interact via refs (`press`, `click`, `fill`, `scroll`)
+4. Read/assert/wait for state (`get`, `is`, `wait`, `find`)
+5. Re-snapshot after mutations
+
+It is Selenium-like automation for native macOS apps.
+
+Coverage includes 74 AX role mappings (100% official macOS SDK coverage).
 
 ## Prerequisites
 
-1. macOS 13+ with Xcode command line tools (`swift --version` works)
-2. Accessibility trust enabled for the terminal/agent process running `agent-swift`
-3. Target app is running and exposes accessibility elements
-4. Read current `program*.md` and `eval.sh` before changing code
-5. **If running over SSH**: AX tree access requires the GUI session context. Run commands as the console user:
-   ```bash
-   sudo launchctl asuser 501 sudo -u <gui-user> agent-swift snapshot -i
-   ```
-   Find the GUI user UID with `id -u <username>` and username with `stat -f %Su /dev/console`.
-
-## Canonical workflow
+1. macOS 13+
+2. Xcode command line tools (`swift --version` works)
+3. Accessibility permission for the terminal/agent process
+4. Target app running and exposing accessibility elements
+5. If running over SSH: execute in GUI user context
 
 ```bash
-# 1) Verify host readiness
-agent-swift doctor
-
-# 2) Connect to target app
-agent-swift connect --bundle-id com.apple.TextEdit
-# or
-agent-swift connect --pid 12345
-
-# 3) Capture refs
-agent-swift snapshot -i
-
-# 4) Interact using refs
-agent-swift press @e1
-
-# 5) Re-snapshot after mutations
-agent-swift snapshot -i
-
-# 6) Disconnect when done
-agent-swift disconnect
+sudo launchctl asuser 501 sudo -u <gui-user> agent-swift snapshot -i
 ```
 
-## State machine
+Find GUI user:
+
+```bash
+stat -f %Su /dev/console
+id -u <username>
+```
+
+## State Machine
 
 ```text
 [disconnected] --connect--> [connected] --snapshot--> [refs valid]
      ^                          |                        |
-     |                      disconnect               press/fill/etc
+     |                      disconnect          press/click/fill/scroll/find(action)
      |                          |                        |
      +----------<---------------+----<---- [refs stale] --snapshot--> [refs valid]
 ```
 
-- `status` and `doctor` are safe in any state.
-- `snapshot`, `press`, `fill`, `get`, `find`, `wait`, `is`, `screenshot` require connected state.
-- Mutating actions can stale refs; refresh with `snapshot`.
+Rules:
 
-## Output shapes
+- `doctor` and `status` are safe in any state.
+- All UI operations require connected state.
+- Mutating actions can stale refs; run `snapshot` again before next selection.
 
-### `snapshot` (human)
+## Command Reference (15)
+
+| Command | Purpose | Typical human output | JSON output shape |
+|---|---|---|---|
+| `doctor` | Host and permission checks | `✓ Accessibility access granted` | `{ "checks": [...], "allPass": true }` |
+| `connect` | Connect by `--pid`/`--bundle-id` | `Connected to PID 12345 (com.apple.TextEdit)` | `{ "connected": true, "pid": 12345, "bundleId": "...", "connectedAt": "..." }` |
+| `disconnect` | Clear active session | `Disconnected` | `{ "disconnected": true }` |
+| `status` | Session state + refs count | `Connected ...` / `Not connected` | `{ "connected": true, "pid": 12345, "bundleId": "...", "connectedAt": "...", "refs": 12 }` |
+| `snapshot` | Build `@eN` refs from AX tree | `@e1 [button] "Save"` | `[ { "ref": "e1", "type": "button", "label": "Save", "role": "AXButton", ... } ]` |
+| `press` | Activate ref via AXPress/AXConfirm; fallback click | `Pressed @e1` | `{ "pressed": "@e1", "success": true }` |
+| `click` | Direct CGEvent click by ref or `x y` | `Clicked @e1 at (420, 280)` | `{ "clicked": "@e1", "x": 420.0, "y": 280.0, "success": true }` |
+| `fill` | Set text value on ref | `Filled @e2 with "hello"` | `{ "filled": "@e2", "text": "hello", "success": true }` |
+| `get` | Read `text/type/role/identifier/attrs` | value text or attrs lines | `{ "ref": "@e2", "property": "text", "value": "hello" }` or attrs object |
+| `find` | Locate by `role/text/identifier` (+ optional action) | `@e3 [button] "Save"` / `Found @e3 → pressed` | `{ "ref": "@e3", ... }` or action result object |
+| `screenshot` | Save PNG of target app window | `Screenshot saved to /tmp/shot.png` | `{ "path": "/tmp/shot.png", "success": true }` |
+| `is` | Assertion check (`exists/visible/enabled/focused`) | `true` / `false` | `{ "ref": "@e1", "condition": "exists", "result": true }` |
+| `wait` | Poll for `exists/visible/text/gone` or delay | `Condition met: text Saved (320ms)` | `{ "condition": "text", "target": "Saved", "success": true, "elapsed": 320 }` |
+| `scroll` | `up/down` or scroll ref into view | `Scrolled down` / `Scrolled @e8 into view` | `{ "target": "down", "success": true }` |
+| `schema` | Machine-readable command schema | JSON only | `{ "name": "press", "args": [...], "flags": [...], "exitCodes": {...} }` |
+
+## Canonical Workflow
+
+```bash
+agent-swift doctor
+agent-swift connect --bundle-id com.apple.TextEdit
+agent-swift snapshot -i
+agent-swift press @e1
+agent-swift snapshot -i
+agent-swift disconnect
+```
+
+## JSON Mode
+
+JSON output is enabled when any of these are true:
+
+1. `--json` is passed
+2. `AGENT_SWIFT_JSON=1`
+3. stdout is non-TTY (auto JSON)
+
+Example:
+
+```bash
+agent-swift doctor --json
+agent-swift status --json
+agent-swift snapshot -i --json
+```
+
+## Output Shapes
+
+`snapshot` (human):
+
 ```text
 @e1 [button] "Save"
 @e2 [textfield] "Name"
-@e3 [statictext] "Ready"
+@e3 [label] "Ready"
 ```
 
-### `snapshot --json`
+`snapshot --json`:
+
 ```json
 [
   {
@@ -81,7 +127,8 @@ agent-swift disconnect
 ]
 ```
 
-### `status --json`
+`status --json`:
+
 ```json
 {
   "connected": true,
@@ -92,7 +139,8 @@ agent-swift disconnect
 }
 ```
 
-### error shape (all commands in JSON mode)
+Error shape (all commands in JSON mode):
+
 ```json
 {
   "error": {
@@ -104,7 +152,7 @@ agent-swift disconnect
 }
 ```
 
-## Exit codes
+## Exit Codes
 
 | Code | Meaning |
 |---|---|
@@ -112,33 +160,47 @@ agent-swift disconnect
 | `1` | Assertion false (`is` command only) |
 | `2` | Error |
 
-## Error recovery playbook
+## Environment Variables
+
+| Variable | Purpose | Example |
+|---|---|---|
+| `AGENT_SWIFT_JSON` | Force JSON output | `AGENT_SWIFT_JSON=1` |
+| `AGENT_SWIFT_TIMEOUT` | Default `wait` timeout (ms) | `AGENT_SWIFT_TIMEOUT=10000` |
+| `AGENT_SWIFT_HOME` | Session home dir (`session.json`) | `AGENT_SWIFT_HOME=/tmp/agent-swift` |
+
+## Error Recovery Playbook
 
 | Error code | Typical cause | Recovery |
 |---|---|---|
-| `AX_NOT_TRUSTED` | Accessibility permission missing | Grant Accessibility access, re-run `doctor` |
-| `APP_NOT_FOUND` | Bundle ID or PID not running | Launch app, verify ID/PID, reconnect |
-| `NOT_CONNECTED` | Session missing or stale | Run `connect`, then `snapshot` |
-| `ELEMENT_NOT_FOUND` | Ref missing/stale | Re-run `snapshot -i`, use new ref |
-| `ACTION_NOT_SUPPORTED` | Element has no press/settable action | Pick a different target from snapshot |
-| `TIMEOUT` | Wait condition not met | Increase timeout or verify target state |
-| `INVALID_ARGS` / `INVALID_INPUT` | Bad CLI arguments | Check `--help`, fix argument format |
-| `COMMAND_FAILED` | Underlying AX/AppKit failure | Capture output + diagnosticId, retry with fresh snapshot |
+| `AX_NOT_TRUSTED` | Accessibility permission missing | Grant permission; re-run `doctor` |
+| `APP_NOT_FOUND` | Bundle ID not running | Launch app, reconnect |
+| `APP_NOT_RUNNING` | Connected PID exited | Reconnect (`connect`) then `snapshot` |
+| `NOT_CONNECTED` | No active session | `connect`, then `snapshot` |
+| `ELEMENT_NOT_FOUND` | Ref missing/stale | Re-run `snapshot -i` and use fresh ref |
+| `INVALID_INPUT` | Bad ref/arg format | Use `@eN` refs or valid coordinates |
+| `INVALID_ARGS` | Unsupported locator/action/condition | Run `--help` and fix arguments |
+| `ACTION_NOT_SUPPORTED` | Element does not support action | Pick a different control |
+| `NO_BOUNDS` | Element has no visible bounds | Scroll into view or use a different target |
+| `CLICK_FAILED` | CGEvent click failed | Verify AX trust and app focus |
+| `SCROLL_FAILED` | Scroll action failed | Try directional scroll (`up/down`) |
+| `SCREENSHOT_FAILED` | Window capture failed | Ensure target window is visible |
+| `TIMEOUT` | Wait condition not met in time | Increase timeout and verify target state |
 
-## Locator strategy
+## Locator Strategy
 
-Use this order for robust automation:
+Use this order:
 
-1. Stable accessibility identifier (`identifier`)
-2. Role + label (`[button] "Save"`)
-3. Role-only fallback (`AXButton`, `AXTextField`) as last resort
+1. Stable `identifier`
+2. Role + label text (`[button] "Save"`)
+3. Role-only fallback (`AXButton`, `AXTextField`)
 
 Guidance:
-- Prefer deterministic controls over volatile text.
-- Avoid relying on tree depth/index when identifier exists.
-- Re-snapshot after UI transitions before selecting next ref.
 
-## Idempotency and retry safety
+- Prefer deterministic controls, not volatile status text.
+- Avoid index/depth assumptions when `identifier` is available.
+- Re-snapshot after UI transitions.
+
+## Idempotency and Retry Safety
 
 | Command | Idempotent | Retry safety | Notes |
 |---|---|---|---|
@@ -146,63 +208,94 @@ Guidance:
 | `connect` | Yes | Safe | Refreshes session target |
 | `disconnect` | Yes | Safe | Clears session |
 | `status` | Yes | Safe | Read-only |
-| `snapshot` | Yes | Safe | Refreshes refs |
-| `press` | No | Caution | Action may trigger twice |
-| `fill` | No | Caution | Text may duplicate/replace unexpectedly |
+| `snapshot` | Yes | Safe | Rebuilds refs |
+| `press` | No | Caution | May trigger action twice |
+| `click` | No | Caution | Re-click can duplicate side effects |
+| `fill` | No | Caution | May overwrite/duplicate text |
 | `get` | Yes | Safe | Read-only |
-| `find` | Depends | Depends | Safe without action; caution with chained mutating actions |
-| `wait` | Yes | Safe | Polling/read-only |
+| `find` | Depends | Depends | Safe when read-only; caution with chained action |
+| `screenshot` | Yes | Safe | Overwrites same output path |
 | `is` | Yes | Safe | Assertion-only |
-| `screenshot` | Yes | Safe | Overwrites path if reused |
+| `wait` | Yes | Safe | Polling/read-only |
+| `scroll` | No | Caution | Re-scroll can move context further |
 | `schema` | Yes | Safe | Static metadata |
 
 ## Recipes
 
-### Press a button by ref
+### Press by ref
+
 ```bash
-agent-swift doctor
 agent-swift connect --bundle-id com.apple.TextEdit
 agent-swift snapshot -i
 agent-swift press @e1
-agent-swift disconnect
 ```
 
-### Recover from stale refs
+### Click for SwiftUI navigation (direct CGEvent)
+
 ```bash
-agent-swift press @e4
-# if ELEMENT_NOT_FOUND:
+agent-swift connect --bundle-id com.example.MySwiftUIApp
 agent-swift snapshot -i
-agent-swift press @e2
+agent-swift click @e4
+```
+
+### `press` fallback for SwiftUI `NavigationLink`
+
+```bash
+agent-swift find text "Settings" press
+```
+
+If AXPress is unsupported, `press` auto-falls back to click at the element center when bounds are available.
+
+### Fill and verify
+
+```bash
+agent-swift fill @e2 "hello world"
+agent-swift get text @e2
+agent-swift is focused @e2
+```
+
+### Wait for state change
+
+```bash
+agent-swift wait text "Saved" --timeout 8000
+agent-swift wait gone @e7
+```
+
+### Scroll workflows
+
+```bash
+agent-swift scroll down --amount 8
+agent-swift scroll @e12
 ```
 
 ### JSON-first automation
+
 ```bash
-agent-swift doctor --json
-agent-swift status --json
+AGENT_SWIFT_JSON=1 agent-swift status
 agent-swift snapshot -i --json
+agent-swift find identifier saveButton click --json
 ```
 
-## Loop control files
+## `CLAUDE.md` Snippet For Your Project
 
-| File | Role | Mutable? |
-|---|---|---|
-| `program*.md` | Phase objectives and acceptance criteria | No (during active loop) |
-| `eval.sh` | Pass/fail evaluator | No (during active loop) |
-| `e2e-test.ts` / `e2e-test.sh` | Runtime validation | No (during active loop) |
-| `agent-swift/` | Build target code | Yes |
+Paste this into your project-level `CLAUDE.md` when you want agents to use `agent-swift`:
 
-## Guardrails
+```md
+## macOS UI Automation via agent-swift
 
-- Keep scope phase-local
-- Do not add speculative features outside current phase
-- Preserve deterministic output and exit-code contract
-- Do not weaken evaluator thresholds
-- Do not skip required e2e gates when enabled
-- Keep evidence reproducible
+Use `agent-swift` for native macOS UI automation.
 
-## Blocked protocol
+Workflow:
+1. `agent-swift doctor`
+2. `agent-swift connect --bundle-id <target.bundle.id>`
+3. `agent-swift snapshot -i`
+4. Interact with refs (`press`, `click`, `fill`, `scroll`, `find`)
+5. Verify (`get`, `is`, `wait`) and capture evidence (`screenshot`)
+6. Re-run `snapshot -i` after mutating actions
+7. `agent-swift disconnect`
 
-If blocked by device/network/permissions:
-1. State blocker
-2. State why it prevents completion
-3. State exact next command/action to unblock
+Defaults:
+- Prefer `identifier` locators, then role+text.
+- Use `--json` (or `AGENT_SWIFT_JSON=1`) for machine parsing.
+- Respect exit codes: 0 success, 1 assertion false (`is`), 2 error.
+```

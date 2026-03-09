@@ -6,6 +6,7 @@ public struct SessionData: Codable {
     public var connectedAt: String?
     public var refs: [String: RefEntry]
     public var lastSnapshotAt: String?
+    public var interactiveSnapshot: Bool?
 
     public struct RefEntry: Codable {
         public let role: String
@@ -40,14 +41,19 @@ public struct SessionData: Codable {
     }
 
     public static var empty: SessionData {
-        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil)
+        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil)
     }
 }
 
 public struct SessionStore {
-    static let defaultPath = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".agent-swift")
-        .appendingPathComponent("session.json")
+    static let defaultPath: URL = {
+        if let home = ProcessInfo.processInfo.environment["AGENT_SWIFT_HOME"] {
+            return URL(fileURLWithPath: home).appendingPathComponent("session.json")
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".agent-swift")
+            .appendingPathComponent("session.json")
+    }()
 
     public let path: URL
 

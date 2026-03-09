@@ -76,6 +76,8 @@ public let ROLE_MAP: [String: String] = [
 
     "AXSearchField": "searchfield",
     "AXDateField": "datefield",
+    "AXTimeField": "timefield",
+    "AXDateTimeArea": "datetimearea",
     "AXLevelIndicator": "levelindicator",
     "AXRadioGroup": "radiogroup",
     "AXStepper": "stepper",
@@ -92,6 +94,7 @@ public let ROLE_MAP: [String: String] = [
     "AXRulerMarker": "rulermarker",
     "AXMatte": "matte",
     "AXGrowArea": "growarea",
+    "AXListMarker": "listmarker",
 
     // --- Scroll Components ---
     "AXScrollBar": "scrollbar",
@@ -101,6 +104,7 @@ public let ROLE_MAP: [String: String] = [
     "AXApplication": "application",
     "AXSystemWide": "system",
     "AXUnknown": "unknown",
+    "AXDockItem": "dockitem",
 
     // --- Web & Misc ---
     "AXWebArea": "webarea",
@@ -119,6 +123,8 @@ public let ROLE_MAP: [String: String] = [
     "AXDrawer": "drawer",
     "AXLayoutArea": "layoutarea",
     "AXLayoutItem": "layoutitem",
+    "AXGrid": "grid",
+    "AXPage": "page",
 
     // --- Table/List Structure ---
     "AXTable": "table",
@@ -145,8 +151,8 @@ public let INTERACTIVE_ROLES: Set<String> = [
     "AXSwitch", "AXToggle", "AXMenuItem", "AXMenuButton",
     "AXLink", "AXTab", "AXTabGroup", "AXDisclosureTriangle",
     "AXIncrementor", "AXColorWell", "AXSegmentedControl",
-    "AXSearchField", "AXDateField", "AXLevelIndicator",
-    "AXRadioGroup", "AXStepper",
+    "AXSearchField", "AXDateField", "AXTimeField", "AXLevelIndicator",
+    "AXRadioGroup", "AXStepper", "AXDockItem",
     "AXMenuBarItem", "AXMenuItemCheckbox", "AXMenuItemRadio",
 ]
 
@@ -330,6 +336,60 @@ public class AXClient {
 
     public static func performPress(element: AXUIElement, actionName: String = "AXPress") -> Bool {
         return AXUIElementPerformAction(element, actionName as CFString) == .success
+    }
+
+    public static func performClick(at point: CGPoint) -> Bool {
+        guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+              let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) else {
+            return false
+        }
+        mouseDown.post(tap: .cgSessionEventTap)
+        Thread.sleep(forTimeInterval: 0.05)
+        mouseUp.post(tap: .cgSessionEventTap)
+        return true
+    }
+
+    public static func performFill(element: AXUIElement, text: String) -> Bool {
+        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, true as CFTypeRef)
+        return AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success
+    }
+
+    public static func captureScreenshot(pid: Int, path: String) -> Bool {
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        let appWindows = windowList.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid }
+        // Pick the largest window (by area) to avoid capturing tiny utility/overlay windows
+        guard let mainWindow = appWindows.max(by: { a, b in
+            let aSize = Self.windowArea(a)
+            let bSize = Self.windowArea(b)
+            return aSize < bSize
+        }), let windowID = mainWindow[kCGWindowNumber as String] as? CGWindowID else {
+            return false
+        }
+        let bounds: CGRect
+        if let boundsDict = mainWindow[kCGWindowBounds as String] as? [String: Any],
+           let boundsRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) {
+            bounds = boundsRect
+        } else {
+            bounds = .null
+        }
+        guard let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming]) else {
+            return false
+        }
+        let url = URL(fileURLWithPath: path)
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
+            return false
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest)
+    }
+
+    private static func windowArea(_ window: [String: Any]) -> Double {
+        guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let w = bounds["Width"] as? Double,
+              let h = bounds["Height"] as? Double else { return 0 }
+        return w * h
     }
 
     public static func collectElements(element: AXUIElement, interactiveOnly: Bool, into result: inout [AXUIElement], maxDepth: Int = 20, depth: Int = 0) {

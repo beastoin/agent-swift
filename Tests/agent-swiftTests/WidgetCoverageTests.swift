@@ -167,4 +167,53 @@ final class WidgetCoverageTests: XCTestCase {
         XCTAssertTrue(mkNode("AXCustomWidget", actions: ["AXPress"]).isInteractive)
         XCTAssertTrue(mkNode("AXCustomWidget", actions: ["AXConfirm"]).isInteractive)
     }
+
+    // ─── Phase 2b: Complete SDK coverage (10+ assertions) ───────────────
+
+    func testNewSDKRoleMappings() {
+        XCTAssertEqual(ROLE_MAP["AXTimeField"], "timefield")
+        XCTAssertEqual(ROLE_MAP["AXDockItem"], "dockitem")
+        XCTAssertEqual(ROLE_MAP["AXGrid"], "grid")
+        XCTAssertEqual(ROLE_MAP["AXPage"], "page")
+        XCTAssertEqual(ROLE_MAP["AXDateTimeArea"], "datetimearea")
+        XCTAssertEqual(ROLE_MAP["AXListMarker"], "listmarker")
+    }
+
+    func testNewSDKRoleInteractivity() {
+        XCTAssertTrue(mkNode("AXTimeField").isInteractive)
+        XCTAssertTrue(mkNode("AXDockItem").isInteractive)
+        XCTAssertFalse(mkNode("AXGrid").isInteractive)
+        XCTAssertFalse(mkNode("AXPage").isInteractive)
+        XCTAssertFalse(mkNode("AXDateTimeArea").isInteractive)
+        XCTAssertFalse(mkNode("AXListMarker").isInteractive)
+    }
+
+    func testCompleteSDKCoverage() {
+        // All 64 official macOS AX roles from AXRoleConstants.h + NSAccessibilityConstants.h
+        let officialRoles = [
+            "AXApplication", "AXSystemWide", "AXWindow", "AXSheet", "AXDrawer",
+            "AXGrowArea", "AXImage", "AXUnknown", "AXButton", "AXRadioButton",
+            "AXCheckBox", "AXPopUpButton", "AXMenuButton", "AXTabGroup", "AXTable",
+            "AXColumn", "AXRow", "AXOutline", "AXBrowser", "AXScrollArea",
+            "AXScrollBar", "AXRadioGroup", "AXList", "AXGroup", "AXValueIndicator",
+            "AXComboBox", "AXSlider", "AXIncrementor", "AXBusyIndicator",
+            "AXProgressIndicator", "AXRelevanceIndicator", "AXToolbar",
+            "AXDisclosureTriangle", "AXTextField", "AXTextArea", "AXStaticText",
+            "AXHeading", "AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem",
+            "AXSplitGroup", "AXSplitter", "AXColorWell", "AXTimeField", "AXDateField",
+            "AXHelpTag", "AXMatte", "AXDockItem", "AXRuler", "AXRulerMarker",
+            "AXGrid", "AXLevelIndicator", "AXCell", "AXLayoutArea", "AXLayoutItem",
+            "AXHandle", "AXPopover", "AXLink", "AXDateTimeArea", "AXListMarker",
+            "AXPage", "AXWebArea",
+        ]
+        XCTAssertEqual(officialRoles.count, 63) // 64 minus deprecated SortButton = 63 unique
+        for role in officialRoles {
+            XCTAssertNotNil(ROLE_MAP[role], "Official SDK role \(role) missing from ROLE_MAP")
+        }
+    }
+
+    func testRoleMapAndInteractiveCountsPhase2b() {
+        XCTAssertGreaterThanOrEqual(ROLE_MAP.count, 72)
+        XCTAssertGreaterThanOrEqual(INTERACTIVE_ROLES.count, 29)
+    }
 }
