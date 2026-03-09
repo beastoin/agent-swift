@@ -22,7 +22,7 @@ final class SnapshotFormatterTests: XCTestCase {
         XCTAssertTrue(lines[0].hasPrefix("@e1 [button] \"Save\""))
         XCTAssertTrue(lines[0].contains("identifier=saveBtn"))
         XCTAssertTrue(lines[1].hasPrefix("@e2 [textfield] \"hello\""))
-        XCTAssertTrue(lines[2].hasPrefix("@e3 [statictext] \"Ready\""))
+        XCTAssertTrue(lines[2].hasPrefix("@e3 [label] \"Ready\""))
     }
 
     func testFormatHumanNoLabel() {

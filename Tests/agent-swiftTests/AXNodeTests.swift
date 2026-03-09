@@ -16,7 +16,7 @@ final class AXNodeTests: XCTestCase {
         let staticText = AXNode(role: "AXStaticText", subrole: nil, title: nil, axDescription: nil, value: "Label",
                                identifier: nil, childStaticText: nil, enabled: true, focused: false,
                                position: nil, size: nil, actions: [], children: [])
-        XCTAssertEqual(staticText.displayType, "statictext")
+        XCTAssertEqual(staticText.displayType, "label")
     }
 
     func testIsInteractive() {
