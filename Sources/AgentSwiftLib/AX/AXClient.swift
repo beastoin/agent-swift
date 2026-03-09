@@ -53,69 +53,32 @@ public enum AXError: Error, CustomStringConvertible {
 /// Canonical mapping from AX roles to display types.
 /// Single source of truth — used by displayType and tests.
 public let ROLE_MAP: [String: String] = [
-    // --- Controls: Buttons ---
+    // --- Controls ---
     "AXButton": "button",
-    "AXMenuButton": "menubutton",
-
-    // --- Controls: Text Input ---
     "AXTextField": "textfield",
     "AXTextArea": "textfield",
-    "AXSearchField": "searchfield",
-    "AXDateField": "datefield",
-
-    // --- Controls: Selection ---
     "AXCheckBox": "checkbox",
     "AXRadioButton": "radio",
-    "AXRadioGroup": "radiogroup",
     "AXPopUpButton": "dropdown",
     "AXComboBox": "dropdown",
-    "AXSegmentedControl": "segmented",
-
-    // --- Controls: Value ---
     "AXSlider": "slider",
     "AXSwitch": "switch",
     "AXToggle": "switch",
-    "AXIncrementor": "stepper",
-    "AXStepper": "stepper",
-    "AXColorWell": "colorwell",
-    "AXLevelIndicator": "levelindicator",
-
-    // --- Controls: Disclosure ---
-    "AXDisclosureTriangle": "disclosure",
-
-    // --- Navigation & Links ---
+    "AXMenuItem": "menuitem",
+    "AXMenuButton": "menubutton",
     "AXLink": "link",
     "AXTab": "tab",
     "AXTabGroup": "tabgroup",
+    "AXDisclosureTriangle": "disclosure",
+    "AXIncrementor": "stepper",
+    "AXColorWell": "colorwell",
+    "AXSegmentedControl": "segmented",
 
-    // --- Menus ---
-    "AXMenu": "menu",
-    "AXMenuBar": "menubar",
-    "AXMenuBarItem": "menubaritem",
-    "AXMenuItem": "menuitem",
-    "AXMenuItemCheckbox": "menuitem",
-    "AXMenuItemRadio": "menuitem",
-
-    // --- Containers & Layout ---
-    "AXGroup": "group",
-    "AXWindow": "window",
-    "AXToolbar": "toolbar",
-    "AXScrollArea": "scrollarea",
-    "AXSplitGroup": "splitgroup",
-    "AXSplitter": "splitter",
-    "AXSheet": "sheet",
-    "AXDrawer": "drawer",
-    "AXLayoutArea": "layoutarea",
-    "AXLayoutItem": "layoutitem",
-
-    // --- Table/List Structure ---
-    "AXTable": "table",
-    "AXList": "list",
-    "AXOutline": "outline",
-    "AXBrowser": "browser",
-    "AXRow": "row",
-    "AXColumn": "column",
-    "AXCell": "cell",
+    "AXSearchField": "searchfield",
+    "AXDateField": "datefield",
+    "AXLevelIndicator": "levelindicator",
+    "AXRadioGroup": "radiogroup",
+    "AXStepper": "stepper",
 
     // --- Content & Display ---
     "AXStaticText": "label",
@@ -139,36 +102,52 @@ public let ROLE_MAP: [String: String] = [
     "AXSystemWide": "system",
     "AXUnknown": "unknown",
 
-    // --- Web Content ---
+    // --- Web & Misc ---
     "AXWebArea": "webarea",
+    "AXPopover": "popover",
+    "AXHelpTag": "helptag",
     "AXTextMarkerRange": "textmarkerrange",
 
-    // --- Popover ---
-    "AXPopover": "popover",
+    // --- Containers & Layout ---
+    "AXGroup": "group",
+    "AXWindow": "window",
+    "AXToolbar": "toolbar",
+    "AXScrollArea": "scrollarea",
+    "AXSplitGroup": "splitgroup",
+    "AXSplitter": "splitter",
+    "AXSheet": "sheet",
+    "AXDrawer": "drawer",
+    "AXLayoutArea": "layoutarea",
+    "AXLayoutItem": "layoutitem",
 
-    // --- Help ---
-    "AXHelpTag": "helptag",
+    // --- Table/List Structure ---
+    "AXTable": "table",
+    "AXList": "list",
+    "AXOutline": "outline",
+    "AXBrowser": "browser",
+    "AXRow": "row",
+    "AXColumn": "column",
+    "AXCell": "cell",
+
+    // --- Menus ---
+    "AXMenu": "menu",
+    "AXMenuBar": "menubar",
+    "AXMenuBarItem": "menubaritem",
+    "AXMenuItemCheckbox": "menuitem",
+    "AXMenuItemRadio": "menuitem",
 ]
 
 /// Interactive AX roles that agents can interact with.
 /// Used by isInteractive and collectElements — single source of truth.
 public let INTERACTIVE_ROLES: Set<String> = [
-    // Buttons
-    "AXButton", "AXMenuButton",
-    // Text input
-    "AXTextField", "AXTextArea", "AXSearchField", "AXDateField",
-    // Selection
-    "AXCheckBox", "AXRadioButton", "AXRadioGroup",
-    "AXPopUpButton", "AXComboBox", "AXSegmentedControl",
-    // Value
-    "AXSlider", "AXSwitch", "AXToggle", "AXIncrementor", "AXStepper",
-    "AXColorWell", "AXLevelIndicator",
-    // Disclosure
-    "AXDisclosureTriangle",
-    // Navigation & Links
-    "AXLink", "AXTab", "AXTabGroup",
-    // Menu items
-    "AXMenuItem", "AXMenuBarItem", "AXMenuItemCheckbox", "AXMenuItemRadio",
+    "AXButton", "AXTextField", "AXTextArea", "AXCheckBox",
+    "AXRadioButton", "AXPopUpButton", "AXComboBox", "AXSlider",
+    "AXSwitch", "AXToggle", "AXMenuItem", "AXMenuButton",
+    "AXLink", "AXTab", "AXTabGroup", "AXDisclosureTriangle",
+    "AXIncrementor", "AXColorWell", "AXSegmentedControl",
+    "AXSearchField", "AXDateField", "AXLevelIndicator",
+    "AXRadioGroup", "AXStepper",
+    "AXMenuBarItem", "AXMenuItemCheckbox", "AXMenuItemRadio",
 ]
 
 public struct AXNode {
