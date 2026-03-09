@@ -43,6 +43,7 @@ fi
 # Extract and install
 echo "Installing to ${INSTALL_DIR}..."
 tar -xzf "${TMPDIR}/${TARBALL}" -C "${TMPDIR}"
+mkdir -p "${INSTALL_DIR}" 2>/dev/null || sudo mkdir -p "${INSTALL_DIR}"
 if [[ -w "$INSTALL_DIR" ]]; then
   mv "${TMPDIR}/agent-swift" "${INSTALL_DIR}/agent-swift"
 else
