@@ -2,6 +2,8 @@
 
 CLI for AI agents to control macOS apps via the Accessibility API.
 
+![demo](assets/e2e-demo.gif)
+
 ## Install
 
 ### Homebrew (recommended)
