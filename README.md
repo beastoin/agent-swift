@@ -81,17 +81,27 @@ agent-swift disconnect
 | `scroll` | Scroll direction (`up/down`) or scroll ref into view | `agent-swift scroll down --amount 8` |
 | `schema` | Output machine-readable command schema | `agent-swift schema` |
 
-## Key Features
+### Global flags
 
-- 15 commands for full native app automation lifecycle
-- `press` auto-fallback to CGEvent click (works for SwiftUI `NavigationLink` cases)
-- Dedicated `click` command for direct mouse events
-- 74 AX role mappings (100% official macOS SDK coverage)
-- JSON mode via `--json`, `AGENT_SWIFT_JSON=1`, or automatic non-TTY detection
-- Exit codes: `0=success`, `1=assertion false` (`is` only), `2=error`
-- `find` chained actions, e.g. `find text Save press`
+| Flag | Description |
+|---|---|
+| `--json` | Force JSON output |
+| `--help` | Show help |
 
-## JSON Output
+## Snapshot format
+
+```text
+@e1 [button] "Save"  identifier=saveButton
+@e2 [textfield] "Name"
+@e3 [label] "Ready"
+```
+
+- Refs are sequential per snapshot (`@e1`, `@e2`, ...) and reset on each `snapshot` call.
+- Re-run `snapshot` after UI-changing commands (`press`, `click`, `fill`, `scroll`) — refs may shift.
+- `snapshot --json` returns objects with `ref`, `type`, `label`, `role`, `identifier`, `enabled`, `focused`, `bounds`.
+- `snapshot -i` filters to interactive elements only.
+
+## JSON output
 
 JSON is enabled when:
 
@@ -149,13 +159,50 @@ Error shape (JSON mode):
 }
 ```
 
-## Environment Variables
+## Environment variables
 
-- `AGENT_SWIFT_JSON=1` force JSON output
-- `AGENT_SWIFT_TIMEOUT=8000` default timeout (ms) for `wait`
-- `AGENT_SWIFT_HOME=/custom/path` session directory (stores `session.json`)
+| Variable | Purpose | Default |
+|---|---|---|
+| `AGENT_SWIFT_JSON` | JSON output mode (`1`) | unset |
+| `AGENT_SWIFT_TIMEOUT` | Default `wait` timeout (ms) | `5000` |
+| `AGENT_SWIFT_HOME` | Session directory path | `~/.agent-swift` |
 
-## Agent Integration
+Precedence: CLI flag > env var > built-in default.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Assertion false (`is` command only) |
+| `2` | Error |
+
+## Development
+
+This repo is the **publish target**. Source of truth is [`beastoin/autoloop`](https://github.com/beastoin/autoloop) — all code changes go through autoloop's phase-gated build loop (program → implement → eval → keep/revert), then get copied here for release.
+
+Do not edit this repo directly. To make changes, add a new phase program in autoloop.
+
+```bash
+# For local testing only
+git clone https://github.com/beastoin/agent-swift.git
+cd agent-swift
+swift build
+swift test
+swift build -c release --arch arm64 --arch x86_64  # universal binary
+```
+
+## Related tools
+
+| Tool | Platform | Transport |
+|---|---|---|
+| `agent-swift` | Native macOS apps | Accessibility API (`AXUIElement`) |
+| [`agent-flutter`](https://github.com/beastoin/agent-flutter) | Flutter apps | Dart VM Service + Marionette |
+| [`autoloop`](https://github.com/beastoin/autoloop) | Build system | Phase-gated eval loops |
+
+All share the same `snapshot → @ref → press/fill/wait/is` workflow.
+
+## Agent integration
 
 See [AGENTS.md](AGENTS.md) for the full AI-agent integration guide.
 
