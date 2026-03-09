@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal binary
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          BINARY=".build/apple/Products/Release/agent-swift"
+          cp "$BINARY" agent-swift
+          chmod +x agent-swift
+          # Verify it's universal
+          file agent-swift
+          lipo -info agent-swift
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          tar -czf "agent-swift-${VERSION}-macos-universal.tar.gz" agent-swift
+          shasum -a 256 "agent-swift-${VERSION}-macos-universal.tar.gz" > "agent-swift-${VERSION}-macos-universal.tar.gz.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            agent-swift-*-macos-universal.tar.gz
+            agent-swift-*-macos-universal.tar.gz.sha256
+
+  update-homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          TARBALL_URL="https://github.com/beastoin/agent-swift/releases/download/v${VERSION}/agent-swift-${VERSION}-macos-universal.tar.gz"
+
+          # Download and get SHA
+          curl -sL "${TARBALL_URL}.sha256" -o sha256.txt
+          SHA256=$(cat sha256.txt | awk '{print $1}')
+
+          # Clone homebrew-tap
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/beastoin/homebrew-tap.git"
+          cd homebrew-tap
+
+          # Update formula
+          cat > Formula/agent-swift.rb << FORMULA
+          class AgentSwift < Formula
+            desc "CLI for AI agents to control macOS apps via Accessibility API"
+            homepage "https://github.com/beastoin/agent-swift"
+            url "${TARBALL_URL}"
+            sha256 "${SHA256}"
+            version "${VERSION}"
+            license "MIT"
+
+            def install
+              bin.install "agent-swift"
+            end
+
+            test do
+              assert_match "agent-swift", shell_output("#{bin}/agent-swift --version")
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/agent-swift.rb
+          git commit -m "Update agent-swift to ${VERSION}"
+          git push
