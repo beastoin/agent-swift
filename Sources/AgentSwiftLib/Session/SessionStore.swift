@@ -7,6 +7,9 @@ public struct SessionData: Codable {
     public var refs: [String: RefEntry]
     public var lastSnapshotAt: String?
     public var interactiveSnapshot: Bool?
+    public var simulatorUDID: String?
+    public var simulatorDeviceType: String?
+    public var mirrorMode: Bool?
 
     public struct RefEntry: Codable {
         public let role: String
@@ -14,7 +17,7 @@ public struct SessionData: Codable {
         public let identifier: String?
         public let enabled: Bool
         public let focused: Bool
-        let bounds: Bounds?
+        public let bounds: Bounds?
         public let actions: [String]
 
         public init(role: String, label: String?, identifier: String?, enabled: Bool,
@@ -37,11 +40,19 @@ public struct SessionData: Codable {
     }
 
     public var isConnected: Bool {
-        return pid != nil
+        return pid != nil || simulatorUDID != nil || mirrorMode == true
+    }
+
+    public var isSimulatorMode: Bool {
+        return simulatorUDID != nil
+    }
+
+    public var isMirrorMode: Bool {
+        return mirrorMode == true
     }
 
     public static var empty: SessionData {
-        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil)
+        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil, simulatorUDID: nil, simulatorDeviceType: nil, mirrorMode: nil)
     }
 }
 
