@@ -226,4 +226,100 @@ final class SimulatorTests: XCTestCase {
         XCTAssertEqual(size.width, 393)
         XCTAssertEqual(size.height, 852)
     }
+
+    // MARK: - CGEvent coordinate mapping (direction to swipe)
+
+    func testDirectionToSwipeCoordsUp() {
+        let coords = SimulatorBridge.directionToSwipeCoords(direction: "up")
+        XCTAssertEqual(coords.fromX, coords.toX, accuracy: 0.01)
+        XCTAssertGreaterThan(coords.fromY, coords.toY)
+    }
+
+    func testDirectionToSwipeCoordsDown() {
+        let coords = SimulatorBridge.directionToSwipeCoords(direction: "down")
+        XCTAssertEqual(coords.fromX, coords.toX, accuracy: 0.01)
+        XCTAssertLessThan(coords.fromY, coords.toY)
+    }
+
+    func testDirectionToSwipeCoordsLeft() {
+        let coords = SimulatorBridge.directionToSwipeCoords(direction: "left")
+        XCTAssertEqual(coords.fromY, coords.toY, accuracy: 0.01)
+        XCTAssertGreaterThan(coords.fromX, coords.toX)
+    }
+
+    func testDirectionToSwipeCoordsRight() {
+        let coords = SimulatorBridge.directionToSwipeCoords(direction: "right")
+        XCTAssertEqual(coords.fromY, coords.toY, accuracy: 0.01)
+        XCTAssertLessThan(coords.fromX, coords.toX)
+    }
+
+    func testDirectionToSwipeCoordsCustomSize() {
+        let coords = SimulatorBridge.directionToSwipeCoords(direction: "up", screenWidth: 430, screenHeight: 932)
+        XCTAssertEqual(coords.fromX, 215, accuracy: 0.01)
+        XCTAssertEqual(coords.toX, 215, accuracy: 0.01)
+        let swipeDistance = 932 * 0.4
+        XCTAssertEqual(coords.fromY - coords.toY, swipeDistance, accuracy: 0.01)
+    }
+
+    func testDirectionToSwipeCoordsDefaultDirection() {
+        let coords = SimulatorBridge.directionToSwipeCoords(direction: "unknown")
+        let upCoords = SimulatorBridge.directionToSwipeCoords(direction: "up")
+        XCTAssertEqual(coords.fromX, upCoords.fromX, accuracy: 0.01)
+        XCTAssertEqual(coords.fromY, upCoords.fromY, accuracy: 0.01)
+    }
+
+    // MARK: - CGEvent coordinate mapping for tap
+
+    func testIosPointToScreenCenter() {
+        let winInfo = SimWindowInfo(
+            windowOrigin: CGPoint(x: 100, y: 200),
+            contentSize: CGSize(width: 393, height: 852),
+            deviceSize: CGSize(width: 393, height: 852)
+        )
+        let screenPoint = SimulatorBridge.iosPointToScreen(CGPoint(x: 196.5, y: 426), windowInfo: winInfo)
+        XCTAssertEqual(screenPoint.x, 296.5, accuracy: 0.01)
+        XCTAssertEqual(screenPoint.y, 626.0, accuracy: 0.01)
+    }
+
+    func testIosPointToScreenWithDoubleScale() {
+        let winInfo = SimWindowInfo(
+            windowOrigin: CGPoint(x: 0, y: 0),
+            contentSize: CGSize(width: 786, height: 1704),
+            deviceSize: CGSize(width: 393, height: 852)
+        )
+        XCTAssertEqual(winInfo.scale, 2.0, accuracy: 0.0001)
+        let screenPoint = SimulatorBridge.iosPointToScreen(CGPoint(x: 100, y: 200), windowInfo: winInfo)
+        XCTAssertEqual(screenPoint.x, 200.0, accuracy: 0.01)
+        XCTAssertEqual(screenPoint.y, 400.0, accuracy: 0.01)
+    }
+
+    func testSimWindowInfoZeroWidthScale() {
+        let winInfo = SimWindowInfo(
+            windowOrigin: CGPoint(x: 0, y: 0),
+            contentSize: CGSize(width: 393, height: 852),
+            deviceSize: CGSize(width: 0, height: 852)
+        )
+        XCTAssertEqual(winInfo.scale, 1.0, accuracy: 0.0001)
+    }
+
+    // MARK: - Error codes
+
+    func testSimulatorErrorCodes() {
+        XCTAssertEqual(SimulatorError.noBootedDevice.code, "SIM_NO_BOOTED")
+        XCTAssertEqual(SimulatorError.deviceNotFound("x").code, "SIM_NOT_FOUND")
+        XCTAssertEqual(SimulatorError.deviceNotBooted("x").code, "SIM_NOT_BOOTED")
+        XCTAssertEqual(SimulatorError.simctlFailed("x").code, "SIM_SIMCTL_FAILED")
+        XCTAssertEqual(SimulatorError.simulatorAppNotRunning.code, "SIM_APP_NOT_RUNNING")
+        XCTAssertEqual(SimulatorError.windowNotFound.code, "SIM_WINDOW_NOT_FOUND")
+        XCTAssertEqual(SimulatorError.screenshotFailed("x").code, "SIM_SCREENSHOT_FAILED")
+    }
+
+    func testSimulatorErrorHints() {
+        XCTAssertNotNil(SimulatorError.noBootedDevice.hint)
+        XCTAssertNotNil(SimulatorError.deviceNotFound("test-udid").hint)
+        XCTAssertNotNil(SimulatorError.deviceNotBooted("test-udid").hint)
+        XCTAssertNotNil(SimulatorError.simctlFailed("msg").hint)
+        XCTAssertNotNil(SimulatorError.simulatorAppNotRunning.hint)
+        XCTAssertNotNil(SimulatorError.windowNotFound.hint)
+    }
 }

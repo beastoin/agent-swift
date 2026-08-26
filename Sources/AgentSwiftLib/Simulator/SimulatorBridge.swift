@@ -208,6 +208,87 @@ public struct SimulatorBridge {
         #endif
     }
 
+    #if canImport(AppKit)
+    public func tap(x: Double, y: Double) throws {
+        let info = try windowInfo()
+        let screenPoint = Self.iosPointToScreen(CGPoint(x: x, y: y), windowInfo: info)
+
+        Self.activateSimulator()
+
+        guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                                       mouseCursorPosition: screenPoint, mouseButton: .left),
+              let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                                     mouseCursorPosition: screenPoint, mouseButton: .left) else {
+            throw SimulatorError.simctlFailed("cannot create CGEvent for tap")
+        }
+        mouseDown.post(tap: .cgSessionEventTap)
+        Thread.sleep(forTimeInterval: 0.05)
+        mouseUp.post(tap: .cgSessionEventTap)
+    }
+
+    public func swipe(fromX: Double, fromY: Double, toX: Double, toY: Double, duration: Double? = nil) throws {
+        let info = try windowInfo()
+        let startPoint = Self.iosPointToScreen(CGPoint(x: fromX, y: fromY), windowInfo: info)
+        let endPoint = Self.iosPointToScreen(CGPoint(x: toX, y: toY), windowInfo: info)
+
+        Self.activateSimulator()
+
+        let swipeDuration = duration ?? 0.3
+        let steps = max(Int(swipeDuration * 60), 10)
+        let dx = (endPoint.x - startPoint.x) / Double(steps)
+        let dy = (endPoint.y - startPoint.y) / Double(steps)
+        let stepDelay = swipeDuration / Double(steps)
+
+        guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                                       mouseCursorPosition: startPoint, mouseButton: .left) else {
+            throw SimulatorError.simctlFailed("cannot create mouseDown event")
+        }
+        mouseDown.post(tap: .cgSessionEventTap)
+
+        for i in 1...steps {
+            let current = CGPoint(x: startPoint.x + dx * Double(i), y: startPoint.y + dy * Double(i))
+            guard let drag = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged,
+                                      mouseCursorPosition: current, mouseButton: .left) else {
+                continue
+            }
+            drag.post(tap: .cgSessionEventTap)
+            Thread.sleep(forTimeInterval: stepDelay)
+        }
+
+        guard let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                                     mouseCursorPosition: endPoint, mouseButton: .left) else {
+            throw SimulatorError.simctlFailed("cannot create mouseUp event")
+        }
+        mouseUp.post(tap: .cgSessionEventTap)
+    }
+
+    private static func activateSimulator() {
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.iphonesimulator").first {
+            app.activate()
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+    #endif
+
+    public static func directionToSwipeCoords(direction: String, screenWidth: Double = 393, screenHeight: Double = 852) -> (fromX: Double, fromY: Double, toX: Double, toY: Double) {
+        let cx = screenWidth / 2
+        let cy = screenHeight / 2
+        let swipeDistance = screenHeight * 0.4
+
+        switch direction {
+        case "up":
+            return (cx, cy + swipeDistance / 2, cx, cy - swipeDistance / 2)
+        case "down":
+            return (cx, cy - swipeDistance / 2, cx, cy + swipeDistance / 2)
+        case "left":
+            return (cx + swipeDistance / 2, cy, cx - swipeDistance / 2, cy)
+        case "right":
+            return (cx - swipeDistance / 2, cy, cx + swipeDistance / 2, cy)
+        default:
+            return (cx, cy + swipeDistance / 2, cx, cy - swipeDistance / 2)
+        }
+    }
+
     // MARK: - Internal
 
     static func runSimctl(_ args: [String]) -> (String, Int32) {

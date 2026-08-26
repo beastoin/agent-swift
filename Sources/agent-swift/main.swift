@@ -8,7 +8,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.5.0",
+        version: "0.6.0",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -577,7 +577,19 @@ struct PressCommand: ParsableCommand {
                 } else {
                     print("Pressed \(ref)")
                 }
-            } catch let error as IdbError {
+                return
+            } catch {
+                // idb failed — fall through to CGEvent through Simulator window
+            }
+            let bridge = SimulatorBridge(udid: udid)
+            do {
+                try bridge.tap(x: center.x, y: center.y)
+                if globals.useJson {
+                    print(Output.json(PressResult(pressed: ref, success: true)))
+                } else {
+                    print("Pressed \(ref)")
+                }
+            } catch let error as SimulatorError {
                 Output.printError(code: error.code, message: error.description,
                                 hint: error.hint, useJson: globals.useJson)
                 throw ExitCode(2)
@@ -1477,19 +1489,19 @@ struct ScrollCommand: ParsableCommand {
     }
 
     private func scrollSimulator(udid: String) throws {
-        let idb = IdbBridge(udid: udid)
+        let bridge = SimulatorBridge(udid: udid)
         switch target {
         case "up", "down", "left", "right":
-            let coords = IdbBridge.directionToSwipeCoords(direction: target)
+            let coords = SimulatorBridge.directionToSwipeCoords(direction: target)
             do {
-                try idb.swipe(fromX: coords.fromX, fromY: coords.fromY,
-                             toX: coords.toX, toY: coords.toY)
+                try bridge.swipe(fromX: coords.fromX, fromY: coords.fromY,
+                                toX: coords.toX, toY: coords.toY)
                 if globals.useJson {
                     print(Output.json(ScrollResult(target: target, success: true)))
                 } else {
                     print("Scrolled \(target)")
                 }
-            } catch let error as IdbError {
+            } catch let error as SimulatorError {
                 Output.printError(code: error.code, message: error.description,
                                 hint: error.hint, useJson: globals.useJson)
                 throw ExitCode(2)
@@ -1630,8 +1642,6 @@ struct ClickCommand: ParsableCommand {
             throw ExitCode(2)
         }
 
-        let idb = IdbBridge(udid: udid)
-
         let tapX: Double
         let tapY: Double
         let clickLabel: String
@@ -1651,6 +1661,24 @@ struct ClickCommand: ParsableCommand {
             tapX = bounds.x + bounds.width / 2
             tapY = bounds.y + bounds.height / 2
             clickLabel = target.hasPrefix("@") ? target : "@\(target)"
+
+            let idb = IdbBridge(udid: udid)
+            do {
+                try idb.tap(x: tapX, y: tapY)
+                if globals.useJson {
+                    print(Output.json(ClickResult(
+                        clicked: clickLabel, x: tapX, y: tapY, success: true,
+                        mode: "simulator",
+                        iosPoint: ["x": tapX, "y": tapY],
+                        screenPoint: nil
+                    )))
+                } else {
+                    print("Tapped iOS (\(Int(tapX)), \(Int(tapY)))")
+                }
+                return
+            } catch {
+                // idb failed — fall through to CGEvent
+            }
         } else {
             guard let x = Double(target), let yCoord = y else {
                 Output.printError(code: "INVALID_INPUT", message: "Invalid click target: \(target)",
@@ -1662,19 +1690,22 @@ struct ClickCommand: ParsableCommand {
             clickLabel = "\(Int(x)),\(Int(yCoord))"
         }
 
+        let bridge = SimulatorBridge(udid: udid)
         do {
-            try idb.tap(x: tapX, y: tapY)
+            let info = try bridge.windowInfo()
+            let screenPoint = SimulatorBridge.iosPointToScreen(CGPoint(x: tapX, y: tapY), windowInfo: info)
+            try bridge.tap(x: tapX, y: tapY)
             if globals.useJson {
                 print(Output.json(ClickResult(
                     clicked: clickLabel, x: tapX, y: tapY, success: true,
                     mode: "simulator",
                     iosPoint: ["x": tapX, "y": tapY],
-                    screenPoint: nil
+                    screenPoint: ["x": screenPoint.x, "y": screenPoint.y]
                 )))
             } else {
-                print("Tapped iOS (\(Int(tapX)), \(Int(tapY)))")
+                print("Tapped iOS (\(Int(tapX)), \(Int(tapY))) → screen (\(Int(screenPoint.x)), \(Int(screenPoint.y)))")
             }
-        } catch let error as IdbError {
+        } catch let error as SimulatorError {
             Output.printError(code: error.code, message: error.description,
                             hint: error.hint, useJson: globals.useJson)
             throw ExitCode(2)
