@@ -8,7 +8,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.7.0",
+        version: "0.8.0",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -26,6 +26,7 @@ struct AgentSwift: ParsableCommand {
             ClickCommand.self,
             TypeCommand.self,
             SwipeCommand.self,
+            RecordCommand.self,
             SchemaCommand.self
         ]
     )
@@ -2107,6 +2108,472 @@ struct SwipeCommand: ParsableCommand {
     }
 }
 
+// MARK: - Record
+
+struct RecordCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "record",
+        abstract: "Screen video recording",
+        discussion: """
+            Record screen video and extract frames at any timestamp.
+
+            Workflow:
+              1. record start       → begin recording
+              2. record frame --at 0  → live screenshot (current screen only)
+              3. record stop        → finalize video
+              4. record frame --at 4  → extract frame at 4th second from video
+
+            NOTE: Frame lookback (--at a past timestamp) is only available AFTER
+            record stop. During recording, record frame returns a live screenshot
+            of the current screen regardless of --at value. Plan your workflow:
+            record first, then extract any frame you need from the finished video.
+            """,
+        subcommands: [
+            RecordStartCommand.self,
+            RecordStopCommand.self,
+            RecordFrameCommand.self,
+            RecordStatusCommand.self
+        ]
+    )
+}
+
+struct RecordStartCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Start screen recording")
+
+    @OptionGroup var globals: GlobalOptions
+
+    struct StartResult: Codable {
+        let sessionId: String
+        let videoPath: String
+        let startTime: String
+        let mode: String
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        var session = store.load()
+
+        guard session.isConnected else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect first", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        if session.recording != nil {
+            Output.printError(code: "RECORDING_ACTIVE", message: "A recording is already in progress",
+                            hint: "Stop it first: agent-swift record stop", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        let sessionId = String(UUID().uuidString.prefix(8)).lowercased()
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        // Determine session dir for video output
+        let sessionDir: String
+        if let home = ProcessInfo.processInfo.environment["AGENT_SWIFT_HOME"] {
+            sessionDir = home
+        } else {
+            sessionDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".agent-swift").path
+        }
+        try FileManager.default.createDirectory(atPath: sessionDir, withIntermediateDirectories: true)
+        let videoPath = "\(sessionDir)/recording-\(sessionId).mp4"
+
+        let mode: String
+        let recordProcess = Process()
+
+        if session.isSimulatorMode, let udid = session.simulatorUDID {
+            mode = "simulator"
+            // xcrun simctl io <udid> recordVideo --codec h264 --force <path>
+            recordProcess.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            recordProcess.arguments = ["simctl", "io", udid, "recordVideo", "--codec", "h264", "--force", videoPath]
+        } else if session.isMirrorMode {
+            mode = "mirror"
+            // screencapture -v <path> — records screen video
+            recordProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            recordProcess.arguments = ["-v", videoPath]
+        } else {
+            mode = "desktop"
+            recordProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            recordProcess.arguments = ["-v", videoPath]
+        }
+
+        recordProcess.standardOutput = FileHandle.nullDevice
+        recordProcess.standardError = FileHandle.nullDevice
+
+        do {
+            try recordProcess.run()
+        } catch {
+            Output.printError(code: "RECORD_START_FAILED", message: "Failed to start recording: \(error.localizedDescription)",
+                            hint: nil, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Small delay to let the recording process initialize
+        Thread.sleep(forTimeInterval: 0.5)
+
+        guard recordProcess.isRunning else {
+            Output.printError(code: "RECORD_START_FAILED", message: "Recording process exited immediately",
+                            hint: "Check if simctl/screencapture is available", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        let recordingSession = RecordingSession(
+            sessionId: sessionId,
+            pid: recordProcess.processIdentifier,
+            videoPath: videoPath,
+            startTime: now,
+            mode: mode
+        )
+        session.recording = recordingSession
+        try store.save(session)
+
+        let result = StartResult(sessionId: sessionId, videoPath: videoPath, startTime: now, mode: mode)
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            print("Recording started (session: \(sessionId), mode: \(mode))")
+            print("Video: \(videoPath)")
+        }
+    }
+}
+
+struct RecordStopCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "stop", abstract: "Stop screen recording")
+
+    @OptionGroup var globals: GlobalOptions
+
+    struct StopResult: Codable {
+        let sessionId: String
+        let videoPath: String
+        let duration: Double?
+        let fileSize: Int64?
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        var session = store.load()
+
+        guard let recording = session.recording else {
+            Output.printError(code: "NO_RECORDING", message: "No active recording",
+                            hint: "Start one first: agent-swift record start", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Send SIGINT to the recording process
+        let pid = recording.pid
+        kill(pid, SIGINT)
+
+        // Wait for the process to finish (up to 5 seconds)
+        var waited = 0.0
+        while waited < 5.0 {
+            if kill(pid, 0) != 0 { break } // process is gone
+            Thread.sleep(forTimeInterval: 0.2)
+            waited += 0.2
+        }
+
+        // If still running after 5s, force kill
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        let sessionId = recording.sessionId
+        let videoPath = recording.videoPath
+
+        // Clear recording from session
+        session.recording = nil
+        try store.save(session)
+
+        // Get video metadata
+        var duration: Double? = nil
+        var fileSize: Int64? = nil
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: videoPath) {
+            if let attrs = try? fm.attributesOfItem(atPath: videoPath) {
+                fileSize = attrs[.size] as? Int64
+            }
+
+            // Try ffprobe for duration
+            duration = Self.getVideoDuration(path: videoPath)
+        }
+
+        let result = StopResult(sessionId: sessionId, videoPath: videoPath, duration: duration, fileSize: fileSize)
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            print("Recording stopped (session: \(sessionId))")
+            print("Video: \(videoPath)")
+            if let d = duration {
+                print("Duration: \(String(format: "%.1f", d))s")
+            }
+            if let s = fileSize {
+                let kb = s / 1024
+                print("Size: \(kb)KB")
+            }
+        }
+    }
+
+    static func getVideoDuration(path: String) -> Double? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let format = json["format"] as? [String: Any],
+               let durationStr = format["duration"] as? String,
+               let d = Double(durationStr) {
+                return d
+            }
+        } catch {}
+        return nil
+    }
+}
+
+struct RecordFrameCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "frame",
+        abstract: "Extract frame from recording at timestamp",
+        discussion: """
+            During recording: returns a live screenshot (current screen).
+            After record stop: extracts the exact frame at --at timestamp from the finalized video.
+            Lookback to a past timestamp requires stopping the recording first.
+            """
+    )
+
+    @OptionGroup var globals: GlobalOptions
+
+    @Option(name: .long, help: "Timestamp in seconds (e.g. 4.0)")
+    var at: Double
+
+    @Option(name: .long, help: "Output file path (default: auto-generated)")
+    var output: String?
+
+    struct FrameResult: Codable {
+        let path: String
+        let timestamp: Double
+        let source: String  // "live" or "video"
+        let success: Bool
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        let session = store.load()
+
+        guard at >= 0 else {
+            Output.printError(code: "INVALID_ARGS", message: "Timestamp must be >= 0",
+                            hint: "Example: agent-swift record frame --at 4.0", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Check if ffmpeg is available
+        guard Self.isFfmpegAvailable() else {
+            Output.printError(code: "FFMPEG_NOT_FOUND", message: "ffmpeg is not installed",
+                            hint: "Install with: brew install ffmpeg", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Determine output path
+        let sessionDir: String
+        if let home = ProcessInfo.processInfo.environment["AGENT_SWIFT_HOME"] {
+            sessionDir = home
+        } else {
+            sessionDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".agent-swift").path
+        }
+        try FileManager.default.createDirectory(atPath: sessionDir, withIntermediateDirectories: true)
+        let outputPath = output ?? "\(sessionDir)/frame-\(String(format: "%.1f", at))s.png"
+
+        if let recording = session.recording {
+            // Recording is active — check if the process is still running
+            if kill(recording.pid, 0) == 0 {
+                // Recording is live — use screenshot for live capture
+                // (video file is not finalized during recording)
+                try extractLiveFrame(session: session, outputPath: outputPath)
+                return
+            }
+            // Process is dead but recording wasn't cleaned up — try the video file
+        }
+
+        // Look for the most recent video file in session dir
+        let videoPath = session.recording?.videoPath ?? findLatestVideo(in: sessionDir)
+
+        guard let video = videoPath, FileManager.default.fileExists(atPath: video) else {
+            Output.printError(code: "NO_VIDEO", message: "No recording video found",
+                            hint: "Start a recording first: agent-swift record start", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Extract frame from finalized video using ffmpeg
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["ffmpeg", "-y", "-ss", String(at), "-i", video, "-frames:v", "1", "-update", "1", outputPath]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            Output.printError(code: "FRAME_EXTRACT_FAILED", message: "Failed to run ffmpeg: \(error.localizedDescription)",
+                            hint: nil, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: outputPath) else {
+            Output.printError(code: "FRAME_EXTRACT_FAILED", message: "ffmpeg failed to extract frame at \(at)s",
+                            hint: "The timestamp may be beyond the video duration", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        let result = FrameResult(path: outputPath, timestamp: at, source: "video", success: true)
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            print("Frame extracted at \(at)s → \(outputPath)")
+        }
+    }
+
+    private func extractLiveFrame(session: SessionData, outputPath: String) throws {
+        // During active recording, take a live screenshot instead
+        let screenshotPath = outputPath
+
+        if session.isSimulatorMode, let udid = session.simulatorUDID {
+            let bridge = SimulatorBridge(udid: udid)
+            do {
+                try bridge.screenshot(to: screenshotPath)
+            } catch {
+                Output.printError(code: "LIVE_FRAME_FAILED", message: "Failed to capture live frame: \(error)",
+                                hint: nil, useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+        } else if session.isMirrorMode {
+            let mirror = MirrorBridge()
+            do {
+                try mirror.screenshot(to: screenshotPath)
+            } catch {
+                Output.printError(code: "LIVE_FRAME_FAILED", message: "Failed to capture live frame: \(error)",
+                                hint: nil, useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+        } else if let pid = session.pid {
+            let success = AXClient.captureScreenshot(pid: pid, path: screenshotPath)
+            guard success else {
+                Output.printError(code: "LIVE_FRAME_FAILED", message: "Failed to capture live frame",
+                                hint: nil, useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+        } else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session for live capture",
+                            hint: nil, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        let result = FrameResult(path: screenshotPath, timestamp: at, source: "live", success: true)
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            print("Live frame captured → \(screenshotPath)")
+        }
+    }
+
+    private func findLatestVideo(in dir: String) -> String? {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: dir) else { return nil }
+        let videos = files.filter { $0.hasPrefix("recording-") && $0.hasSuffix(".mp4") }
+            .sorted().reversed()
+        return videos.first.map { "\(dir)/\($0)" }
+    }
+
+    static func isFfmpegAvailable() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["ffmpeg", "-version"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+}
+
+struct RecordStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show recording state")
+
+    @OptionGroup var globals: GlobalOptions
+
+    struct StatusResult: Codable {
+        let active: Bool
+        let sessionId: String?
+        let videoPath: String?
+        let startTime: String?
+        let elapsedSeconds: Double?
+        let mode: String?
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        let session = store.load()
+
+        if let recording = session.recording {
+            let isAlive = kill(recording.pid, 0) == 0
+            var elapsed: Double? = nil
+            if let startDate = ISO8601DateFormatter().date(from: recording.startTime) {
+                elapsed = Date().timeIntervalSince(startDate)
+            }
+
+            if isAlive {
+                let result = StatusResult(
+                    active: true,
+                    sessionId: recording.sessionId,
+                    videoPath: recording.videoPath,
+                    startTime: recording.startTime,
+                    elapsedSeconds: elapsed,
+                    mode: recording.mode
+                )
+                if globals.useJson {
+                    print(Output.json(result))
+                } else {
+                    print("Recording active (session: \(recording.sessionId), mode: \(recording.mode))")
+                    if let e = elapsed {
+                        print("Elapsed: \(String(format: "%.1f", e))s")
+                    }
+                    print("Video: \(recording.videoPath)")
+                }
+            } else {
+                // Process dead but recording wasn't cleaned up
+                let result = StatusResult(active: false, sessionId: recording.sessionId,
+                                         videoPath: recording.videoPath, startTime: recording.startTime,
+                                         elapsedSeconds: nil, mode: recording.mode)
+                if globals.useJson {
+                    print(Output.json(result))
+                } else {
+                    print("Recording inactive (stale session: \(recording.sessionId))")
+                    print("Video may be at: \(recording.videoPath)")
+                }
+            }
+        } else {
+            let result = StatusResult(active: false, sessionId: nil, videoPath: nil,
+                                     startTime: nil, elapsedSeconds: nil, mode: nil)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("No active recording")
+            }
+        }
+    }
+}
+
 // MARK: - Schema
 
 // CommandSchema is defined in AgentSwiftLib/Output/CommandSchema.swift
@@ -2190,6 +2657,13 @@ func allSchemas() -> [CommandSchema] { return [
                .init(name: "toY", type: "number", required: true)],
         flags: [
             .init(name: "--duration", type: "number", defaultValue: "0.3"),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
+    CommandSchema(name: "record", description: "Screen video recording (start/stop/frame/status). Frame lookback (--at past timestamp) only works after stop; during recording, frame returns live screenshot.",
+        args: [],
+        flags: [
+            .init(name: "--at", type: "number", defaultValue: nil),
+            .init(name: "--output", type: "string", defaultValue: nil),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "schema", description: "Show command schema",
