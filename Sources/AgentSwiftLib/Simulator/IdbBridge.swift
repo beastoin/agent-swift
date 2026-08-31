@@ -103,10 +103,7 @@ public struct IdbBridge {
             throw IdbError.notFound
         }
 
-        var args = ["ui", "describe-all", "--udid", udid, "--nested", "--json"]
-        if includeAll {
-            args.append("--all")
-        }
+        let args = ["ui", "describe-all", "--udid", udid, "--nested", "--json"]
         let (output, exitCode) = Self.runIdb(args)
         guard exitCode == 0 else {
             if output.contains("accessibility server has not started") || output.contains("ApplicationAccessibilityEnabled") {
