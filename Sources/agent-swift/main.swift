@@ -8,7 +8,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.6.0",
+        version: "0.7.0",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -24,6 +24,8 @@ struct AgentSwift: ParsableCommand {
             WaitCommand.self,
             ScrollCommand.self,
             ClickCommand.self,
+            TypeCommand.self,
+            SwipeCommand.self,
             SchemaCommand.self
         ]
     )
@@ -189,6 +191,9 @@ struct ConnectCommand: ParsableCommand {
     @Option(name: .long, help: "Connect to iOS Simulator (optional UDID, omit for auto-detect)")
     var simulator: String?
 
+    @Option(name: .long, help: "Simulator UDID (alias for --simulator)")
+    var udid: String?
+
     @Flag(name: .long, help: "Enable simulator mode (auto-detect booted device)")
     var sim = false
 
@@ -214,7 +219,7 @@ struct ConnectCommand: ParsableCommand {
             return
         }
 
-        if sim || simulator != nil {
+        if sim || simulator != nil || udid != nil {
             try connectSimulator(store: store, now: now)
             return
         }
@@ -269,8 +274,9 @@ struct ConnectCommand: ParsableCommand {
 
     private func connectSimulator(store: SessionStore, now: String) throws {
         let bridge: SimulatorBridge
+        let resolvedUdid = udid ?? simulator
         do {
-            if let udid = simulator, !udid.isEmpty {
+            if let udid = resolvedUdid, !udid.isEmpty {
                 bridge = try SimulatorBridge.device(udid: udid)
             } else {
                 bridge = try SimulatorBridge.bootedDevice()
@@ -437,6 +443,9 @@ struct SnapshotCommand: ParsableCommand {
     @Flag(name: .shortAndLong, help: "Interactive elements only")
     var interactive = false
 
+    @Flag(name: .long, help: "Include off-screen and clipped elements")
+    var all = false
+
     func run() throws {
         let store = SessionStore()
         var session = store.load()
@@ -496,7 +505,7 @@ struct SnapshotCommand: ParsableCommand {
         let idb = IdbBridge(udid: udid)
         let idbElements: [IdbElement]
         do {
-            idbElements = try idb.describeAll()
+            idbElements = try idb.describeAll(includeAll: all)
         } catch let error as IdbError {
             Output.printError(code: error.code, message: error.description,
                             hint: error.hint, useJson: globals.useJson)
@@ -504,7 +513,7 @@ struct SnapshotCommand: ParsableCommand {
         }
 
         var filtered = idbElements
-        if interactive {
+        if interactive && !all {
             filtered = filtered.filter { $0.isInteractive }
         }
 
@@ -893,33 +902,40 @@ struct GetCommand: ParsableCommand {
 // MARK: - Find
 
 struct FindCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "find", abstract: "Find element by locator")
+    static let configuration = CommandConfiguration(commandName: "find",
+        abstract: "Find element by locator",
+        discussion: """
+        Locators: role, text, identifier, label, value
+        Actions: press, click, fill <text>, get [property]
+
+        Single locator:
+          agent-swift find text Save press
+          agent-swift find role button
+
+        Compound locators (AND logic):
+          agent-swift find role button text Open press
+          agent-swift find identifier myField text Hello fill "world"
+        """)
 
     @OptionGroup var globals: GlobalOptions
 
-    @Argument(help: "Locator type: role, text, or identifier")
-    var locator: String
-
-    @Argument(help: "Value to match")
-    var value: String
-
-    @Argument(help: "Optional chained action: press, click, fill, or get")
-    var action: String?
-
-    @Argument(help: "Action argument (text for fill, property for get)")
-    var actionArg: String?
+    @Argument(parsing: .remaining,
+              help: "Locator/value pairs followed by optional action: <locator> <value> [<locator> <value>...] [action] [actionArg]")
+    var remaining: [String] = []
 
     struct FindResult: Codable {
         let ref: String
         let type: String
         let label: String?
         let identifier: String?
+        let matchCount: Int?
     }
 
     struct FindActionResult: Codable {
         let found: String
         let action: String
         let success: Bool
+        let matchCount: Int?
     }
 
     struct FindFillResult: Codable {
@@ -936,6 +952,74 @@ struct FindCommand: ParsableCommand {
         let value: String
     }
 
+    // Known locator names and action names for compound parsing
+    static let locatorNames: Set<String> = ["role", "text", "identifier", "label", "value"]
+    static let actionNames: Set<String> = ["press", "click", "fill", "get"]
+
+    /// Parse remaining args into locator pairs + optional action + actionArg
+    func parseCompoundArgs() -> (locatorPairs: [(String, String)], action: String?, actionArg: String?) {
+        var locatorPairs: [(String, String)] = []
+        var action: String? = nil
+        var actionArg: String? = nil
+        var i = 0
+        let args = remaining
+
+        while i < args.count {
+            let current = args[i]
+            if Self.locatorNames.contains(current) {
+                // It's a locator — next arg is its value
+                if i + 1 < args.count {
+                    locatorPairs.append((current, args[i + 1]))
+                    i += 2
+                } else {
+                    // Locator with no value — treat as error
+                    break
+                }
+            } else if Self.actionNames.contains(current) {
+                action = current
+                if i + 1 < args.count {
+                    actionArg = args[i + 1]
+                }
+                break
+            } else if locatorPairs.isEmpty {
+                // Backwards compat: first two args are locator value without compound
+                if i + 1 < args.count {
+                    locatorPairs.append((current, args[i + 1]))
+                    i += 2
+                } else {
+                    break
+                }
+            } else {
+                // Unknown token — could be an action
+                action = current
+                if i + 1 < args.count {
+                    actionArg = args[i + 1]
+                }
+                break
+            }
+        }
+
+        return (locatorPairs, action, actionArg)
+    }
+
+    /// Check if a node matches a single locator pair
+    func nodeMatches(_ node: AXNode, locator: String, value: String) -> Bool {
+        switch locator {
+        case "role":
+            return node.role == value || node.displayType == value
+        case "text", "label":
+            if let label = node.displayLabel, label.contains(value) { return true }
+            return false
+        case "identifier":
+            return node.identifier == value
+        case "value":
+            if let v = node.displayLabel, v.contains(value) { return true }
+            return false
+        default:
+            return false
+        }
+    }
+
     func run() throws {
         let store = SessionStore()
         let session = store.load()
@@ -946,6 +1030,44 @@ struct FindCommand: ParsableCommand {
             throw ExitCode(2)
         }
 
+        let parsed = parseCompoundArgs()
+        let locatorPairs = parsed.locatorPairs
+        let action = parsed.action
+        let actionArg = parsed.actionArg
+
+        guard !locatorPairs.isEmpty else {
+            Output.printError(code: "INVALID_ARGS", message: "No locator specified",
+                            hint: "Usage: agent-swift find <locator> <value> [action]\n  Locators: role, text, identifier, label, value\n  Actions: press, click, fill <text>, get [property]\n  Compound: find role button text Open press", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Validate locator names
+        for (loc, _) in locatorPairs {
+            if !Self.locatorNames.contains(loc) {
+                var hint = "Use: role, text, identifier, label, or value"
+                // Suggest corrections for common typos
+                if loc == "label" || loc == "title" || loc == "name" {
+                    hint = "Did you mean 'text'? Use: role, text, identifier, label, or value"
+                } else if loc == "type" {
+                    hint = "Did you mean 'role'? Use: role, text, identifier, label, or value"
+                }
+                Output.printError(code: "INVALID_ARGS", message: "Unknown locator: \(loc)",
+                                hint: hint, useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+        }
+
+        // Validate action name if provided
+        if let action = action, !Self.actionNames.contains(action) {
+            var hint = "Use: press, click, fill, or get"
+            if action == "tap" {
+                hint = "Did you mean 'press'? Use: press, click, fill, or get"
+            }
+            Output.printError(code: "INVALID_ARGS", message: "Unknown action: \(action)",
+                            hint: hint, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
         // Walk tree to get nodes
         let root = AXClient.appElement(pid: pid)
         let tree = AXClient.walkTree(element: root)
@@ -953,48 +1075,39 @@ struct FindCommand: ParsableCommand {
         let useInteractive = session.interactiveSnapshot ?? false
         let nodes = useInteractive ? allNodes.filter { $0.isInteractive } : allNodes
 
-        // Find matching element
-        var matchIndex: Int? = nil
+        // Find ALL matching elements (compound AND logic)
+        var matchIndices: [Int] = []
         for (i, node) in nodes.enumerated() {
-            switch locator {
-            case "role":
-                if node.role == value || node.displayType == value {
-                    matchIndex = i
-                }
-            case "text":
-                if let label = node.displayLabel, label.contains(value) {
-                    matchIndex = i
-                }
-            case "identifier":
-                if node.identifier == value {
-                    matchIndex = i
-                }
-            default:
-                Output.printError(code: "INVALID_ARGS", message: "Unknown locator: \(locator)",
-                                hint: "Use: role, text, or identifier", useJson: globals.useJson)
-                throw ExitCode(2)
+            let matchesAll = locatorPairs.allSatisfy { (loc, val) in
+                nodeMatches(node, locator: loc, value: val)
             }
-            if matchIndex != nil { break }
+            if matchesAll {
+                matchIndices.append(i)
+            }
         }
 
-        guard let idx = matchIndex else {
-            Output.printError(code: "ELEMENT_NOT_FOUND", message: "No element matches \(locator)=\"\(value)\"",
+        guard let idx = matchIndices.first else {
+            let desc = locatorPairs.map { "\($0.0)=\"\($0.1)\"" }.joined(separator: " AND ")
+            Output.printError(code: "ELEMENT_NOT_FOUND", message: "No element matches \(desc)",
                             hint: "Re-run: agent-swift snapshot -i", useJson: globals.useJson)
             throw ExitCode(2)
         }
 
         let matchedNode = nodes[idx]
         let matchedRef = "@e\(idx + 1)"
+        let matchCount = matchIndices.count
 
         // If no chained action, just print the match
         guard let action = action else {
             if globals.useJson {
                 print(Output.json(FindResult(ref: matchedRef, type: matchedNode.displayType,
-                                            label: matchedNode.displayLabel, identifier: matchedNode.identifier)))
+                                            label: matchedNode.displayLabel, identifier: matchedNode.identifier,
+                                            matchCount: matchCount)))
             } else {
                 var line = "\(matchedRef) [\(matchedNode.displayType)]"
                 if let label = matchedNode.displayLabel { line += " \"\(label)\"" }
                 if let id = matchedNode.identifier { line += "  identifier=\(id)" }
+                if matchCount > 1 { line += "  (\(matchCount) matches)" }
                 print(line)
             }
             return
@@ -1027,7 +1140,7 @@ struct FindCommand: ParsableCommand {
             }
             if acted {
                 if globals.useJson {
-                    print(Output.json(FindActionResult(found: matchedRef, action: "press", success: true)))
+                    print(Output.json(FindActionResult(found: matchedRef, action: "press", success: true, matchCount: matchCount)))
                 } else {
                     print("Found \(matchedRef) → pressed")
                 }
@@ -1049,7 +1162,7 @@ struct FindCommand: ParsableCommand {
             }
             if AXClient.performClick(at: center) {
                 if globals.useJson {
-                    print(Output.json(FindActionResult(found: matchedRef, action: "click", success: true)))
+                    print(Output.json(FindActionResult(found: matchedRef, action: "click", success: true, matchCount: matchCount)))
                 } else {
                     print("Found \(matchedRef) → clicked at (\(Int(center.x)), \(Int(center.y)))")
                 }
@@ -1743,6 +1856,257 @@ struct ClickCommand: ParsableCommand {
     }
 }
 
+// MARK: - Type
+
+struct TypeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "type", abstract: "Type text into focused field")
+
+    @OptionGroup var globals: GlobalOptions
+
+    @Argument(help: "Text to type")
+    var text: String
+
+    struct TypeResult: Codable {
+        let typed: String
+        let success: Bool
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        let session = store.load()
+
+        guard session.isConnected else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        if session.isSimulatorMode, let udid = session.simulatorUDID {
+            try typeSimulator(udid: udid)
+            return
+        }
+
+        if session.isMirrorMode {
+            try typeMirror()
+            return
+        }
+
+        guard let pid = session.pid else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // macOS AX mode: find focused element and fill it
+        guard AXClient.isProcessRunning(pid: pid) else {
+            Output.printError(code: "APP_NOT_RUNNING", message: "Target app (PID \(pid)) is no longer running",
+                            hint: "Reconnect with: agent-swift connect", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        let root = AXClient.appElement(pid: pid)
+        // Try to find the focused element and fill it
+        let focusedElement = AXClient.focusedElement(of: root)
+        if let focused = focusedElement {
+            if AXClient.performFill(element: focused, text: text) {
+                if globals.useJson {
+                    print(Output.json(TypeResult(typed: text, success: true)))
+                } else {
+                    print("Typed \"\(text)\"")
+                }
+                return
+            }
+        }
+
+        // Fallback: use CGEvent key-by-key typing
+        if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+            app.activate()
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        typeViaCGEvent(text: text)
+        if globals.useJson {
+            print(Output.json(TypeResult(typed: text, success: true)))
+        } else {
+            print("Typed \"\(text)\" (via keystroke)")
+        }
+    }
+
+    private func typeSimulator(udid: String) throws {
+        let idb = IdbBridge(udid: udid)
+        do {
+            try idb.text(input: text)
+            if globals.useJson {
+                print(Output.json(TypeResult(typed: text, success: true)))
+            } else {
+                print("Typed \"\(text)\"")
+            }
+        } catch let error as IdbError {
+            Output.printError(code: error.code, message: error.description,
+                            hint: error.hint, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+    }
+
+    private func typeMirror() throws {
+        typeViaCGEvent(text: text)
+        if globals.useJson {
+            print(Output.json(TypeResult(typed: text, success: true)))
+        } else {
+            print("Typed \"\(text)\" (via keystroke)")
+        }
+    }
+
+    private func typeViaCGEvent(text: String) {
+        #if canImport(AppKit)
+        for char in text {
+            let str = String(char)
+            let src = CGEventSource(stateID: .hidSystemState)
+            if let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
+               let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false) {
+                let nsStr = str as NSString
+                var unichar = nsStr.character(at: 0)
+                keyDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
+                keyUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
+                keyDown.post(tap: .cgSessionEventTap)
+                Thread.sleep(forTimeInterval: 0.02)
+                keyUp.post(tap: .cgSessionEventTap)
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        }
+        #endif
+    }
+}
+
+// MARK: - Swipe
+
+struct SwipeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "swipe", abstract: "Swipe gesture by coordinates")
+
+    @OptionGroup var globals: GlobalOptions
+
+    @Argument(help: "Start X coordinate")
+    var fromX: Double
+
+    @Argument(help: "Start Y coordinate")
+    var fromY: Double
+
+    @Argument(help: "End X coordinate")
+    var toX: Double
+
+    @Argument(help: "End Y coordinate")
+    var toY: Double
+
+    @Option(name: .long, help: "Swipe duration in seconds (default: 0.3)")
+    var duration: Double = 0.3
+
+    struct SwipeResult: Codable {
+        let from: [String: Double]
+        let to: [String: Double]
+        let success: Bool
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        let session = store.load()
+
+        guard session.isConnected else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        if session.isSimulatorMode, let udid = session.simulatorUDID {
+            try swipeSimulator(udid: udid)
+            return
+        }
+
+        if session.isMirrorMode {
+            try swipeMirror()
+            return
+        }
+
+        guard let pid = session.pid else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // macOS desktop mode: CGEvent drag
+        if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+            app.activate()
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        swipeViaCGEvent(from: CGPoint(x: fromX, y: fromY), to: CGPoint(x: toX, y: toY), duration: duration)
+
+        let result = SwipeResult(from: ["x": fromX, "y": fromY], to: ["x": toX, "y": toY], success: true)
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            print("Swiped from (\(Int(fromX)), \(Int(fromY))) to (\(Int(toX)), \(Int(toY)))")
+        }
+    }
+
+    private func swipeSimulator(udid: String) throws {
+        let bridge = SimulatorBridge(udid: udid)
+        do {
+            try bridge.swipe(fromX: fromX, fromY: fromY, toX: toX, toY: toY, duration: duration)
+            let result = SwipeResult(from: ["x": fromX, "y": fromY], to: ["x": toX, "y": toY], success: true)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("Swiped from (\(Int(fromX)), \(Int(fromY))) to (\(Int(toX)), \(Int(toY)))")
+            }
+        } catch let error as SimulatorError {
+            Output.printError(code: error.code, message: error.description,
+                            hint: error.hint, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+    }
+
+    private func swipeMirror() throws {
+        let mirror = MirrorBridge()
+        do {
+            try mirror.swipe(fromX: fromX, fromY: fromY, toX: toX, toY: toY, duration: duration)
+            let result = SwipeResult(from: ["x": fromX, "y": fromY], to: ["x": toX, "y": toY], success: true)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("Swiped from (\(Int(fromX)), \(Int(fromY))) to (\(Int(toX)), \(Int(toY)))")
+            }
+        } catch let error as MirrorError {
+            Output.printError(code: error.code, message: error.description,
+                            hint: error.hint, useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+    }
+
+    private func swipeViaCGEvent(from: CGPoint, to: CGPoint, duration: Double) {
+        #if canImport(AppKit)
+        let steps = max(Int(duration * 60), 5) // ~60fps
+        guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                                       mouseCursorPosition: from, mouseButton: .left) else { return }
+        mouseDown.post(tap: .cgSessionEventTap)
+        Thread.sleep(forTimeInterval: 0.02)
+
+        for i in 1...steps {
+            let progress = Double(i) / Double(steps)
+            let x = from.x + (to.x - from.x) * progress
+            let y = from.y + (to.y - from.y) * progress
+            if let drag = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged,
+                                   mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left) {
+                drag.post(tap: .cgSessionEventTap)
+            }
+            Thread.sleep(forTimeInterval: duration / Double(steps))
+        }
+
+        if let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                                  mouseCursorPosition: to, mouseButton: .left) {
+            mouseUp.post(tap: .cgSessionEventTap)
+        }
+        #endif
+    }
+}
+
 // MARK: - Schema
 
 // CommandSchema is defined in AgentSwiftLib/Output/CommandSchema.swift
@@ -1756,6 +2120,7 @@ func allSchemas() -> [CommandSchema] { return [
             .init(name: "--pid", type: "int", defaultValue: nil),
             .init(name: "--bundle-id", type: "string", defaultValue: nil),
             .init(name: "--simulator", type: "string", defaultValue: nil),
+            .init(name: "--udid", type: "string", defaultValue: nil),
             .init(name: "--sim", type: "bool", defaultValue: "false"),
             .init(name: "--mirror", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
@@ -1769,6 +2134,7 @@ func allSchemas() -> [CommandSchema] { return [
     CommandSchema(name: "snapshot", description: "Capture element tree with refs",
         args: [], flags: [
             .init(name: "-i", type: "bool", defaultValue: "false"),
+            .init(name: "--all", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "press", description: "Press element by ref",
@@ -1783,9 +2149,8 @@ func allSchemas() -> [CommandSchema] { return [
         args: [.init(name: "property", type: "string", required: true), .init(name: "ref", type: "string", required: true)],
         flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
         exitCodes: ["0": "success", "2": "error"]),
-    CommandSchema(name: "find", description: "Find element by locator",
-        args: [.init(name: "locator", type: "string", required: true), .init(name: "value", type: "string", required: true),
-               .init(name: "action", type: "string", required: false), .init(name: "actionArg", type: "string", required: false)],
+    CommandSchema(name: "find", description: "Find element by locator (supports compound: find role button text Open press)",
+        args: [.init(name: "remaining", type: "string...", required: true)],
         flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
         exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "screenshot", description: "Capture app screenshot",
@@ -1814,6 +2179,19 @@ func allSchemas() -> [CommandSchema] { return [
                .init(name: "y", type: "number", required: false)],
         flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
         exitCodes: ["0": "success", "2": "error"]),
+    CommandSchema(name: "type", description: "Type text into focused field",
+        args: [.init(name: "text", type: "string", required: true)],
+        flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
+        exitCodes: ["0": "success", "2": "error"]),
+    CommandSchema(name: "swipe", description: "Swipe gesture by coordinates",
+        args: [.init(name: "fromX", type: "number", required: true),
+               .init(name: "fromY", type: "number", required: true),
+               .init(name: "toX", type: "number", required: true),
+               .init(name: "toY", type: "number", required: true)],
+        flags: [
+            .init(name: "--duration", type: "number", defaultValue: "0.3"),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "schema", description: "Show command schema",
         args: [.init(name: "command", type: "string", required: false)],
         flags: [], exitCodes: ["0": "success", "2": "error"]),

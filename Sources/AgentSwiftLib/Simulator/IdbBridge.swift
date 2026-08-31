@@ -98,12 +98,16 @@ public struct IdbBridge {
         self.udid = udid
     }
 
-    public func describeAll() throws -> [IdbElement] {
+    public func describeAll(includeAll: Bool = false) throws -> [IdbElement] {
         guard Self.isIdbAvailable() else {
             throw IdbError.notFound
         }
 
-        let (output, exitCode) = Self.runIdb(["ui", "describe-all", "--udid", udid, "--nested", "--json"])
+        var args = ["ui", "describe-all", "--udid", udid, "--nested", "--json"]
+        if includeAll {
+            args.append("--all")
+        }
+        let (output, exitCode) = Self.runIdb(args)
         guard exitCode == 0 else {
             if output.contains("accessibility server has not started") || output.contains("ApplicationAccessibilityEnabled") {
                 throw IdbError.accessibilityDisabled

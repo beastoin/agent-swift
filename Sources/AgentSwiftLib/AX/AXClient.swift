@@ -349,6 +349,15 @@ public class AXClient {
         return true
     }
 
+    public static func focusedElement(of appElement: AXUIElement) -> AXUIElement? {
+        var focusedValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedValue)
+        if result == .success, let element = focusedValue {
+            return (element as! AXUIElement)
+        }
+        return nil
+    }
+
     public static func performFill(element: AXUIElement, text: String) -> Bool {
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, true as CFTypeRef)
         return AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success
