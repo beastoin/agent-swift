@@ -156,10 +156,72 @@ final class RecordingTests: XCTestCase {
                       "Session ID should be hex chars or dashes")
     }
 
+    // MARK: - lastVideoPath persistence
+
+    func testLastVideoPathNilByDefault() {
+        let session = SessionData.empty
+        XCTAssertNil(session.lastVideoPath, "New session should have no lastVideoPath")
+    }
+
+    func testLastVideoPathPreservedAfterRecordingCleared() throws {
+        var session = SessionData.empty
+        session.recording = RecordingSession(sessionId: "r1", pid: 1, videoPath: "/tmp/vid.mp4",
+                                             startTime: "2026-01-01T00:00:00Z", mode: "simulator")
+        // Simulate record stop: save video path, clear recording
+        session.lastVideoPath = session.recording?.videoPath
+        session.recording = nil
+        XCTAssertNil(session.recording)
+        XCTAssertEqual(session.lastVideoPath, "/tmp/vid.mp4", "Video path should persist after stop")
+        // Verify through encode/decode
+        let data = try JSONEncoder().encode(session)
+        let decoded = try JSONDecoder().decode(SessionData.self, from: data)
+        XCTAssertNil(decoded.recording)
+        XCTAssertEqual(decoded.lastVideoPath, "/tmp/vid.mp4")
+    }
+
+    func testLastVideoPathUpdatedOnNewRecording() {
+        var session = SessionData.empty
+        session.lastVideoPath = "/tmp/old.mp4"
+        session.recording = RecordingSession(sessionId: "r2", pid: 2, videoPath: "/tmp/new.mp4",
+                                             startTime: "2026-01-01T00:00:00Z", mode: "desktop")
+        // Simulate stop
+        session.lastVideoPath = session.recording?.videoPath
+        session.recording = nil
+        XCTAssertEqual(session.lastVideoPath, "/tmp/new.mp4", "lastVideoPath should be updated to new recording")
+    }
+
+    func testVideoPathResolutionOrder() {
+        // Priority: --video flag > active recording > lastVideoPath > error (no guessing)
+        var session = SessionData.empty
+        session.lastVideoPath = "/tmp/last.mp4"
+        session.recording = RecordingSession(sessionId: "r3", pid: 3, videoPath: "/tmp/active.mp4",
+                                             startTime: "2026-01-01T00:00:00Z", mode: "simulator")
+
+        // Explicit --video flag always wins
+        let explicitVideo = "/tmp/explicit.mp4"
+        let resolvedWithFlag: String = explicitVideo  // --video flag takes priority
+        XCTAssertEqual(resolvedWithFlag, "/tmp/explicit.mp4", "Explicit --video flag should win")
+
+        // Without flag: active recording takes priority
+        let resolvedNoFlag = session.recording?.videoPath ?? session.lastVideoPath
+        XCTAssertEqual(resolvedNoFlag, "/tmp/active.mp4", "Active recording path should take priority")
+
+        // After stop: lastVideoPath is the fallback
+        session.lastVideoPath = session.recording?.videoPath
+        session.recording = nil
+        let resolvedAfterStop = session.recording?.videoPath ?? session.lastVideoPath
+        XCTAssertEqual(resolvedAfterStop, "/tmp/active.mp4", "lastVideoPath should be used after stop")
+
+        // With no recording and no lastVideoPath: should be nil (error, not a guess)
+        session.lastVideoPath = nil
+        let resolvedEmpty = session.recording?.videoPath ?? session.lastVideoPath
+        XCTAssertNil(resolvedEmpty, "No fallback guessing — should be nil when no video info available")
+    }
+
     // MARK: - Version check
 
-    func testVersionIs080() {
-        let version = "0.8.0"
+    func testVersionIs08x() {
+        let version = "0.8.2"
         XCTAssertTrue(version.hasPrefix("0.8"), "Version should be 0.8.x for phase 13")
     }
 

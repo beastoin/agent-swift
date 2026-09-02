@@ -27,6 +27,8 @@ public struct SessionData: Codable {
     public var simulatorDeviceType: String?
     public var mirrorMode: Bool?
     public var recording: RecordingSession?
+    public var lastVideoPath: String?
+    public var lastFramePath: String?
 
     public struct RefEntry: Codable {
         public let role: String
@@ -69,7 +71,7 @@ public struct SessionData: Codable {
     }
 
     public static var empty: SessionData {
-        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil, simulatorUDID: nil, simulatorDeviceType: nil, mirrorMode: nil, recording: nil)
+        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil, simulatorUDID: nil, simulatorDeviceType: nil, mirrorMode: nil, recording: nil, lastVideoPath: nil, lastFramePath: nil)
     }
 }
 
