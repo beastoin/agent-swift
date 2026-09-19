@@ -271,10 +271,38 @@ public struct IdbBridge {
 
     // MARK: - Process
 
+    static func resolveIdbPath() -> String {
+        // Check environment override first
+        if let envPath = ProcessInfo.processInfo.environment["IDB_PATH"], !envPath.isEmpty {
+            return envPath
+        }
+        // Resolve via which
+        let whichProcess = Process()
+        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        whichProcess.arguments = ["idb"]
+        let whichPipe = Pipe()
+        whichProcess.standardOutput = whichPipe
+        do {
+            try whichProcess.run()
+            whichProcess.waitUntilExit()
+            let data = whichPipe.fileHandleForReading.readDataToEndOfFile()
+            let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !path.isEmpty && whichProcess.terminationStatus == 0 { return path }
+        } catch { /* fall through to default */ }
+        return "idb"
+    }
+
     static func runIdb(_ args: [String]) -> (String, Int32) {
+        let idbPath = resolveIdbPath()
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/idb")
-        process.arguments = args
+        if idbPath == "idb" {
+            // Use /usr/bin/env to resolve from PATH
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["idb"] + args
+        } else {
+            process.executableURL = URL(fileURLWithPath: idbPath)
+            process.arguments = args
+        }
         let pipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = pipe

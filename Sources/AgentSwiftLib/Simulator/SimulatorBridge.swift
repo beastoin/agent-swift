@@ -135,6 +135,19 @@ public struct SimulatorBridge {
         }
     }
 
+    /// Screenshot that avoids `simctl io` — use during active recording to prevent killing the recording process.
+    /// Falls back to idb screenshot which doesn't conflict with simctl io recordVideo.
+    public func screenshotDuringRecording(to path: String) throws {
+        // Try idb screenshot first (doesn't use simctl io, won't kill recording)
+        let (idbOut, idbCode) = IdbBridge.runIdb(["screenshot", "--udid", udid, path])
+        if idbCode == 0 { return }
+        // Fallback: simctl io screenshot (may disrupt recording — last resort)
+        let (output, exitCode) = Self.runSimctl(["io", udid, "screenshot", "--type=png", path])
+        guard exitCode == 0 else {
+            throw SimulatorError.screenshotFailed("idb: \(idbOut.trimmingCharacters(in: .whitespacesAndNewlines)), simctl: \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+    }
+
     public func deviceScreenSize() throws -> CGSize {
         let (output, exitCode) = Self.runSimctl(["io", udid, "enumerate"])
         guard exitCode == 0 else {

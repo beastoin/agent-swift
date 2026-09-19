@@ -11,6 +11,11 @@ public struct SnapshotElement: Codable {
     let bounds: SessionData.RefEntry.Bounds?
 }
 
+public struct SnapshotResult: Codable {
+    public let elements: [SnapshotElement]
+    public let method: String?
+}
+
 public enum SnapshotFormatter {
     public static func formatHuman(elements: [(ref: String, node: AXNode)]) -> String {
         var lines: [String] = []
@@ -27,7 +32,7 @@ public enum SnapshotFormatter {
         return lines.joined(separator: "\n")
     }
 
-    public static func formatJson(elements: [(ref: String, node: AXNode)]) -> String {
+    public static func formatJson(elements: [(ref: String, node: AXNode)], method: String? = nil) -> String {
         let entries = elements.map { (ref, node) in
             SnapshotElement(
                 ref: ref,
@@ -39,6 +44,9 @@ public enum SnapshotFormatter {
                 focused: node.focused,
                 bounds: node.bounds
             )
+        }
+        if let method = method {
+            return Output.json(SnapshotResult(elements: entries, method: method))
         }
         return Output.json(entries)
     }

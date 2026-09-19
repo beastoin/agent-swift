@@ -26,9 +26,14 @@ public struct SessionData: Codable {
     public var simulatorUDID: String?
     public var simulatorDeviceType: String?
     public var mirrorMode: Bool?
+    public var vphoneVM: String?
+    public var vphoneSocket: String?
+    public var vphoneIP: String?
     public var recording: RecordingSession?
     public var lastVideoPath: String?
     public var lastFramePath: String?
+    public var snapshotMethod: String?
+    public var windowID: Int?
 
     public struct RefEntry: Codable {
         public let role: String
@@ -59,7 +64,7 @@ public struct SessionData: Codable {
     }
 
     public var isConnected: Bool {
-        return pid != nil || simulatorUDID != nil || mirrorMode == true
+        return pid != nil || simulatorUDID != nil || mirrorMode == true || vphoneVM != nil
     }
 
     public var isSimulatorMode: Bool {
@@ -70,8 +75,12 @@ public struct SessionData: Codable {
         return mirrorMode == true
     }
 
+    public var isVphoneMode: Bool {
+        return vphoneVM != nil
+    }
+
     public static var empty: SessionData {
-        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil, simulatorUDID: nil, simulatorDeviceType: nil, mirrorMode: nil, recording: nil, lastVideoPath: nil, lastFramePath: nil)
+        return SessionData(pid: nil, bundleId: nil, connectedAt: nil, refs: [:], lastSnapshotAt: nil, interactiveSnapshot: nil, simulatorUDID: nil, simulatorDeviceType: nil, mirrorMode: nil, vphoneVM: nil, vphoneSocket: nil, vphoneIP: nil, recording: nil, lastVideoPath: nil, lastFramePath: nil, snapshotMethod: nil, windowID: nil)
     }
 }
 
