@@ -145,19 +145,29 @@ public enum EventStamping {
     /// 1. AX semantic (Rank 1): focus element + AXValue write — works even when minimized
     /// 2. SkyLight keyboard (Rank 4): per-char keystroke delivery for apps where AX fails
     ///
-    /// Returns (success, method) where method is "ax" or "skylight".
-    public static func backgroundType(text: String, pid: Int, focusElement: AXUIElement? = nil) -> (Bool, String) {
+    /// Returns (success, method) where method is "ax", "skylight", or "none".
+    public static func backgroundType(text: String, pid: Int, focusElement: AXUIElement? = nil, replace: Bool = false) -> (Bool, String) {
+        // If no focus element provided, try to find one from the app
+        var element = focusElement
+        if element == nil {
+            let appEl = AXUIElementCreateApplication(pid_t(pid))
+            var focusedRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success {
+                element = (focusedRef as! AXUIElement)
+            }
+        }
+
         // Route 1: AX semantic — focus + value write (same as performFill but without activation)
-        if let element = focusElement {
+        if let element = element {
             // Focus element first (required for NSTextView to accept value writes)
             AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, true as CFTypeRef)
             Thread.sleep(forTimeInterval: 0.050)
 
-            // Read existing value, append new text (preserves cursor position behavior)
+            // Read existing value, append or replace
             var existingRef: CFTypeRef?
             AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &existingRef)
             let existing = existingRef as? String ?? ""
-            let newValue = existing + text
+            let newValue = replace ? text : existing + text
 
             if AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, newValue as CFTypeRef) == .success {
                 // Verify the write actually took effect

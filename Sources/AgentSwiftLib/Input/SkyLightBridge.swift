@@ -108,16 +108,15 @@ public final class SkyLightBridge {
     }
 
     /// Check if a window is owned by the expected PID.
+    /// Uses CGWindowListCopyWindowInfo to validate PID ownership.
     public func validateWindowOwner(windowID: CGWindowID, expectedPID: Int) -> Bool {
-        guard let getOwner = _getWindowOwner else { return false }
-        let cid = mainConnectionID()
-        guard cid != 0 else { return false }
-        var ownerCid: Int32 = 0
-        let err = getOwner(cid, windowID, &ownerCid)
-        guard err == 0 else { return false }
-        // ownerCid is the connection ID, not PID — we need to validate differently
-        // For now, use CGWindowListCopyWindowInfo to validate PID ownership
-        return true
+        guard let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        return windowList.contains {
+            ($0[kCGWindowNumber as String] as? Int) == Int(windowID) &&
+            ($0[kCGWindowOwnerPID as String] as? Int) == expectedPID
+        }
     }
 }
 

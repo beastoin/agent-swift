@@ -188,7 +188,7 @@ struct DoctorCommand: ParsableCommand {
                 message: skylight.isAvailable
                     ? "SkyLight background input available (\(skylight.diagnostic))"
                     : "SkyLight not available — background mode disabled (\(skylight.diagnostic))",
-                fix: skylight.isAvailable ? nil : "Use --background flag with click/type/scroll when SkyLight is available"
+                fix: skylight.isAvailable ? nil : "Background mode requires macOS with SkyLight framework. Foreground mode will be used."
             ))
 
             if session.isConnected, let pid = session.pid {
@@ -268,6 +268,8 @@ struct ConnectCommand: ParsableCommand {
         let mode: String?
         let simulatorUDID: String?
         let simulatorDeviceType: String?
+        var windowID: Int? = nil
+        var backgroundAvailable: Bool? = nil
     }
 
     func run() throws {
@@ -333,7 +335,9 @@ struct ConnectCommand: ParsableCommand {
         try store.save(session)
 
         let result = ConnectResult(connected: true, pid: resolvedPid, bundleId: resolvedBundleId,
-                                   connectedAt: now, mode: "desktop", simulatorUDID: nil, simulatorDeviceType: nil)
+                                   connectedAt: now, mode: "desktop", simulatorUDID: nil, simulatorDeviceType: nil,
+                                   windowID: session.windowID,
+                                   backgroundAvailable: SkyLightBridge.shared.isAvailable && session.windowID != nil)
 
         if globals.useJson {
             print(Output.json(result))
@@ -516,11 +520,14 @@ struct StatusCommand: ParsableCommand {
         let mode: String?
         let simulatorUDID: String?
         let simulatorDeviceType: String?
+        var windowID: Int? = nil
+        var backgroundAvailable: Bool? = nil
     }
 
     func run() throws {
         let session = SessionStore().load()
         let mode: String? = session.isConnected ? (session.isVphoneMode ? "vphone" : session.isMirrorMode ? "mirror" : session.isSimulatorMode ? "simulator" : "desktop") : nil
+        let isDesktop = mode == "desktop"
         let result = StatusResult(
             connected: session.isConnected,
             pid: session.pid,
@@ -529,7 +536,9 @@ struct StatusCommand: ParsableCommand {
             refs: session.refs.count,
             mode: mode,
             simulatorUDID: session.simulatorUDID,
-            simulatorDeviceType: session.simulatorDeviceType
+            simulatorDeviceType: session.simulatorDeviceType,
+            windowID: isDesktop ? session.windowID : nil,
+            backgroundAvailable: isDesktop ? (SkyLightBridge.shared.isAvailable && session.windowID != nil) : nil
         )
 
         if globals.useJson {
@@ -622,6 +631,12 @@ struct SnapshotCommand: ParsableCommand {
         session.refs = refs
         session.lastSnapshotAt = ISO8601DateFormatter().string(from: Date())
         session.interactiveSnapshot = interactive
+
+        // Refresh windowID on each snapshot (window may have changed since connect)
+        if let wid = EventStamping.resolveWindowID(pid: pid) {
+            session.windowID = Int(wid)
+        }
+
         try store.save(session)
 
         if globals.useJson {
@@ -740,9 +755,13 @@ struct PressCommand: ParsableCommand {
     @Argument(help: "Element ref (e.g. @e1)")
     var ref: String
 
+    @Flag(name: .long, help: "Use background PID delivery for CGEvent click fallback (no focus steal)")
+    var background = false
+
     struct PressResult: Codable {
         let pressed: String
         let success: Bool
+        var delivery: String? = nil
     }
 
     func run() throws {
@@ -857,17 +876,31 @@ struct PressCommand: ParsableCommand {
             let nodes = useInteractive ? allNodes.filter { $0.isInteractive } : allNodes
             if index < nodes.count, let pos = nodes[index].position, let sz = nodes[index].size {
                 let center = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
-                if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
-                    app.activate()
-                    Thread.sleep(forTimeInterval: 0.1)
+                let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
+                if useBackground, let wid = session.windowID, SkyLightBridge.shared.canPostToPid {
+                    let focusGuard = FocusGuard()
+                    acted = focusGuard.withSuppression(for: pid) {
+                        EventStamping.backgroundClick(at: center, pid: pid, windowID: CGWindowID(wid))
+                    }
+                } else {
+                    if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+                        app.activate()
+                        Thread.sleep(forTimeInterval: 0.1)
+                    }
+                    acted = AXClient.performClick(at: center)
                 }
-                acted = AXClient.performClick(at: center)
             }
         }
 
+        let deliveryMethod: String? = {
+            let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
+            if useBackground, session.windowID != nil, SkyLightBridge.shared.canPostToPid { return "background" }
+            return "ax"  // AXPress/AXConfirm is already background-safe
+        }()
+
         if acted {
             if globals.useJson {
-                print(Output.json(PressResult(pressed: ref, success: true)))
+                print(Output.json(PressResult(pressed: ref, success: true, delivery: deliveryMethod)))
             } else {
                 print("Pressed \(ref)")
             }
@@ -940,10 +973,14 @@ struct FillCommand: ParsableCommand {
     @Argument(help: "Text to enter")
     var text: String
 
+    @Flag(name: .long, help: "Use background AX semantic delivery (no focus steal)")
+    var background = false
+
     struct FillResult: Codable {
         let filled: String
         let text: String
         let success: Bool
+        var delivery: String? = nil
     }
 
     func run() throws {
@@ -1018,18 +1055,39 @@ struct FillCommand: ParsableCommand {
         }
 
         let resolved = try resolveRef(ref, session: session, pid: pid, useJson: globals.useJson)
-        let success = AXClient.performFill(element: resolved.element, text: text)
+        let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
 
-        if success {
-            if globals.useJson {
-                print(Output.json(FillResult(filled: ref, text: text, success: true)))
+        if useBackground {
+            // Background fill: use AX semantic via EventStamping (replace mode)
+            let focusGuard = FocusGuard()
+            let (success, method) = focusGuard.withSuppression(for: pid) {
+                EventStamping.backgroundType(text: text, pid: pid, focusElement: resolved.element, replace: true)
+            }
+            if success {
+                if globals.useJson {
+                    print(Output.json(FillResult(filled: ref, text: text, success: true, delivery: "background")))
+                } else {
+                    print("Filled \(ref) with \"\(text)\" [background/\(method)]")
+                }
             } else {
-                print("Filled \(ref) with \"\(text)\"")
+                Output.printError(code: "FILL_FAILED", message: "Background fill failed for \(ref)",
+                                hint: "Try without --background flag", useJson: globals.useJson)
+                throw ExitCode(2)
             }
         } else {
-            Output.printError(code: "ACTION_NOT_SUPPORTED", message: "Cannot fill \(ref)",
-                            hint: "Element may not accept text input. Use a textfield or textarea.", useJson: globals.useJson)
-            throw ExitCode(2)
+            let success = AXClient.performFill(element: resolved.element, text: text)
+
+            if success {
+                if globals.useJson {
+                    print(Output.json(FillResult(filled: ref, text: text, success: true, delivery: "foreground")))
+                } else {
+                    print("Filled \(ref) with \"\(text)\"")
+                }
+            } else {
+                Output.printError(code: "ACTION_NOT_SUPPORTED", message: "Cannot fill \(ref)",
+                                hint: "Element may not accept text input. Use a textfield or textarea.", useJson: globals.useJson)
+                throw ExitCode(2)
+            }
         }
     }
 }
@@ -1839,8 +1897,17 @@ struct ScrollCommand: ParsableCommand {
 
             if useBackground, let wid = session.windowID, SkyLightBridge.shared.canPostToPid {
                 // Background scroll: PID-targeted via SkyLight
-                // Use center of window as scroll position
-                let scrollPoint = CGPoint(x: 400, y: 300)
+                // Use actual window center as scroll position
+                let scrollPoint: CGPoint
+                if let windowList = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]],
+                   let win = windowList.first(where: { ($0[kCGWindowNumber as String] as? Int) == wid }),
+                   let bounds = win[kCGWindowBounds as String] as? [String: Any],
+                   let wx = bounds["X"] as? Double, let wy = bounds["Y"] as? Double,
+                   let ww = bounds["Width"] as? Double, let wh = bounds["Height"] as? Double {
+                    scrollPoint = CGPoint(x: wx + ww / 2, y: wy + wh / 2)
+                } else {
+                    scrollPoint = CGPoint(x: 400, y: 300)
+                }
                 let focusGuard = FocusGuard()
                 let success = focusGuard.withSuppression(for: pid) {
                     EventStamping.backgroundScroll(at: scrollPoint, pid: pid, windowID: CGWindowID(wid), deltaY: scrollAmount)
@@ -1856,6 +1923,12 @@ struct ScrollCommand: ParsableCommand {
                                     hint: "Try without --background flag", useJson: globals.useJson)
                     throw ExitCode(2)
                 }
+            } else if useBackground && background {
+                // --background explicitly requested but preconditions not met
+                let reason = session.windowID == nil ? "No window ID (reconnect to resolve)" : "SkyLight not available"
+                Output.printError(code: "BACKGROUND_UNAVAILABLE", message: "Background scroll unavailable: \(reason)",
+                                hint: "Run: agent-swift connect --bundle-id <id> (to refresh window ID), or remove --background flag", useJson: globals.useJson)
+                throw ExitCode(2)
             } else if let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: scrollAmount, wheel2: 0, wheel3: 0) {
                 // Foreground scroll
                 if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
@@ -1878,7 +1951,7 @@ struct ScrollCommand: ParsableCommand {
             let acted = AXClient.performPress(element: resolved.element, actionName: "AXScrollToVisible")
             if acted {
                 if globals.useJson {
-                    print(Output.json(ScrollResult(target: target, success: true)))
+                    print(Output.json(ScrollResult(target: target, success: true, delivery: "ax")))
                 } else {
                     print("Scrolled \(target) into view")
                 }
@@ -2047,6 +2120,12 @@ struct ClickCommand: ParsableCommand {
                                 hint: "Try without --background flag", useJson: globals.useJson)
                 throw ExitCode(2)
             }
+        } else if useBackground && background {
+            // --background explicitly requested but preconditions not met
+            let reason = session.windowID == nil ? "No window ID (reconnect to resolve)" : "SkyLight not available"
+            Output.printError(code: "BACKGROUND_UNAVAILABLE", message: "Background click unavailable: \(reason)",
+                            hint: "Run: agent-swift connect --bundle-id <id> (to refresh window ID), or remove --background flag", useJson: globals.useJson)
+            throw ExitCode(2)
         } else {
             // Foreground delivery: activate app, move cursor
             if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
@@ -2282,6 +2361,13 @@ struct TypeCommand: ParsableCommand {
         }
 
         let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
+
+        if useBackground && !SkyLightBridge.shared.canPostToPid && background {
+            // --background explicitly requested but SkyLight not available
+            Output.printError(code: "BACKGROUND_UNAVAILABLE", message: "Background type unavailable: SkyLight not available",
+                            hint: "Remove --background flag to use foreground mode", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
 
         if useBackground && SkyLightBridge.shared.canPostToPid {
             // Background delivery: AX semantic (preferred) + SkyLight keyboard (fallback)
@@ -3763,12 +3849,16 @@ func allSchemas() -> [CommandSchema] { return [
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "press", description: "Press element by ref",
         args: [.init(name: "ref", type: "string", required: true)],
-        flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
-        exitCodes: ["0": "success", "2": "error"]),
+        flags: [
+            .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "fill", description: "Enter text into element by ref",
         args: [.init(name: "ref", type: "string", required: true), .init(name: "text", type: "string", required: true)],
-        flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
-        exitCodes: ["0": "success", "2": "error"]),
+        flags: [
+            .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "get", description: "Read element property by ref",
         args: [.init(name: "property", type: "string", required: true), .init(name: "ref", type: "string", required: true)],
         flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
@@ -3796,17 +3886,22 @@ func allSchemas() -> [CommandSchema] { return [
         args: [.init(name: "target", type: "string", required: true)],
         flags: [
             .init(name: "--amount", type: "int", defaultValue: "5"),
+            .init(name: "--background", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "click", description: "Click element or coordinates via CGEvent",
         args: [.init(name: "target", type: "string", required: true),
                .init(name: "y", type: "number", required: false)],
-        flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
-        exitCodes: ["0": "success", "2": "error"]),
+        flags: [
+            .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "type", description: "Type text into focused field",
         args: [.init(name: "text", type: "string", required: true)],
-        flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
-        exitCodes: ["0": "success", "2": "error"]),
+        flags: [
+            .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "swipe", description: "Swipe gesture by coordinates",
         args: [.init(name: "fromX", type: "number", required: true),
                .init(name: "fromY", type: "number", required: true),
