@@ -9,7 +9,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.11.0",
+        version: "0.11.1",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
