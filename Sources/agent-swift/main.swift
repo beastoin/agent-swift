@@ -9,7 +9,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.11.1",
+        version: "0.12.0",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -28,6 +28,8 @@ struct AgentSwift: ParsableCommand {
             TypeCommand.self,
             SwipeCommand.self,
             RecordCommand.self,
+            MenuBarCommand.self,
+            CollectArtifactsCommand.self,
             SchemaCommand.self
         ]
     )
@@ -86,6 +88,9 @@ struct DoctorCommand: ParsableCommand {
 
     @OptionGroup var globals: GlobalOptions
 
+    @Option(name: .long, help: "Diagnose target app TCC/signing (bundle ID or .app path)")
+    var targetApp: String?
+
     struct Check: Codable {
         let name: String
         let status: String
@@ -96,6 +101,14 @@ struct DoctorCommand: ParsableCommand {
     struct DoctorResult: Codable {
         let checks: [Check]
         let allPass: Bool
+        var target: TargetInfo?
+    }
+
+    struct TargetInfo: Codable {
+        let bundleId: String?
+        let pid: Int?
+        let signed: Bool
+        let identity: String?
     }
 
     func run() throws {
@@ -215,18 +228,132 @@ struct DoctorCommand: ParsableCommand {
             }
         }
 
+        // Target app diagnostics (--target-app)
+        var targetInfo: TargetInfo? = nil
+        if let target = targetApp {
+            let resolvedPid: Int?
+            let resolvedBundle: String?
+
+            if target.hasSuffix(".app") {
+                // Path — extract bundle ID from Info.plist
+                let plistPath = target + "/Contents/Info.plist"
+                if let plist = NSDictionary(contentsOfFile: plistPath),
+                   let bid = plist["CFBundleIdentifier"] as? String {
+                    resolvedBundle = bid
+                    resolvedPid = AXClient.resolvePID(bundleId: bid)
+                } else {
+                    resolvedBundle = nil
+                    resolvedPid = nil
+                    checks.append(Check(
+                        name: "target_resolve",
+                        status: "fail",
+                        message: "Cannot read bundle ID from \(target)",
+                        fix: "Provide a valid .app path or bundle ID"
+                    ))
+                }
+            } else {
+                resolvedBundle = target
+                resolvedPid = AXClient.resolvePID(bundleId: target)
+            }
+
+            if let pid = resolvedPid {
+                // AX tree probe
+                let root = AXClient.appElement(pid: pid)
+                let tree = AXClient.walkTree(element: root)
+                let nodes = AXClient.flattenTree(tree)
+                let axOk = !nodes.isEmpty
+                checks.append(Check(
+                    name: "target_ax_tree",
+                    status: axOk ? "pass" : "warn",
+                    message: axOk ? "AX tree accessible (\(nodes.count) elements)" : "AX tree empty — target may need Accessibility permission",
+                    fix: axOk ? nil : "Grant target app Accessibility access in System Settings > Privacy & Security > Accessibility"
+                ))
+
+                // Screenshot probe
+                let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+                let targetWindows = windows.filter { ($0[kCGWindowOwnerPID as String] as? Int) == Int(pid) }
+                let hasWindow = !targetWindows.isEmpty
+                checks.append(Check(
+                    name: "target_screenshot",
+                    status: hasWindow ? "pass" : "warn",
+                    message: hasWindow ? "Target has \(targetWindows.count) on-screen window(s)" : "No on-screen windows for target — screenshot may fail",
+                    fix: hasWindow ? nil : "Make sure target app has a visible window"
+                ))
+
+                // Action probe — try to find an interactive element
+                let interactive = nodes.filter { $0.isInteractive }
+                checks.append(Check(
+                    name: "target_interactive",
+                    status: !interactive.isEmpty ? "pass" : "warn",
+                    message: !interactive.isEmpty ? "\(interactive.count) interactive elements found" : "No interactive elements — buttons/fields may not be exposed",
+                    fix: !interactive.isEmpty ? nil : "Target app may not expose AX actions for its UI elements"
+                ))
+            } else if resolvedBundle != nil {
+                checks.append(Check(
+                    name: "target_running",
+                    status: "fail",
+                    message: "Target app not running: \(resolvedBundle!)",
+                    fix: "Launch the app first: open -a '\(resolvedBundle!)'"
+                ))
+            }
+
+            // Code signing check
+            var signed = false
+            var identity: String? = nil
+            if let bundle = resolvedBundle, let pid = resolvedPid {
+                let appPath = NSWorkspace.shared.runningApplications
+                    .first(where: { $0.processIdentifier == pid })?.bundleURL?.path
+                if let path = appPath {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+                    proc.arguments = ["--display", "--verbose=2", path]
+                    let pipe = Pipe()
+                    proc.standardError = pipe
+                    try? proc.run()
+                    proc.waitUntilExit()
+                    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    signed = proc.terminationStatus == 0
+                    if let range = output.range(of: "Authority=") {
+                        identity = String(output[range.upperBound...].prefix(while: { $0 != "\n" }))
+                    }
+                    let isAdHoc = output.contains("Signature=adhoc")
+                    if isAdHoc {
+                        checks.append(Check(
+                            name: "target_signing",
+                            status: "warn",
+                            message: "Target is ad-hoc signed — TCC identity changes on each rebuild",
+                            fix: "Sign with a stable identity to keep TCC permissions across rebuilds"
+                        ))
+                    } else {
+                        checks.append(Check(
+                            name: "target_signing",
+                            status: signed ? "pass" : "warn",
+                            message: signed ? "Target signed: \(identity ?? "unknown")" : "Target unsigned — TCC may not persist",
+                            fix: signed ? nil : "Sign the app with a Developer ID or development certificate"
+                        ))
+                    }
+                }
+                targetInfo = TargetInfo(bundleId: bundle, pid: Int(pid), signed: signed, identity: identity)
+            } else {
+                targetInfo = TargetInfo(bundleId: resolvedBundle, pid: nil, signed: false, identity: nil)
+            }
+        }
+
         let allPass = checks.allSatisfy { $0.status == "pass" }
-        let result = DoctorResult(checks: checks, allPass: allPass)
+        let result = DoctorResult(checks: checks, allPass: allPass, target: targetInfo)
 
         if globals.useJson {
             print(Output.json(result))
         } else {
             for check in checks {
-                let icon = check.status == "pass" ? "✓" : "✗"
+                let icon = check.status == "pass" ? "✓" : (check.status == "warn" ? "⚠" : "✗")
                 print("\(icon) \(check.message)")
                 if let fix = check.fix {
                     print("  fix: \(fix)")
                 }
+            }
+            if let ti = targetInfo {
+                print("\nTarget: \(ti.bundleId ?? "unknown") (PID: \(ti.pid.map(String.init) ?? "not running"), signed: \(ti.signed))")
             }
         }
     }
@@ -580,6 +707,18 @@ struct SnapshotCommand: ParsableCommand {
     @Flag(name: .long, help: "Include off-screen and clipped elements")
     var all = false
 
+    @Flag(name: .long, help: "Exclude elements with nil or off-screen bounds")
+    var visibleOnly = false
+
+    @Flag(name: .long, help: "Exclude elements with zero width or height")
+    var nonzeroBounds = false
+
+    @Option(name: .long, help: "Filter by AX role (e.g. AXButton or button)")
+    var role: String?
+
+    @Flag(name: .long, help: "Only window children (exclude menu bar, app-level items)")
+    var windowOnly = false
+
     func run() throws {
         let store = SessionStore()
         var session = store.load()
@@ -618,6 +757,38 @@ struct SnapshotCommand: ParsableCommand {
 
         if interactive {
             allNodes = allNodes.filter { $0.isInteractive }
+        }
+
+        if visibleOnly {
+            allNodes = allNodes.filter { node in
+                guard let pos = node.position, let sz = node.size else { return false }
+                return sz.width > 0 && sz.height > 0 && pos.x >= 0 && pos.y >= 0
+            }
+        }
+
+        if nonzeroBounds {
+            allNodes = allNodes.filter { node in
+                guard let sz = node.size else { return false }
+                return sz.width > 0 && sz.height > 0
+            }
+        }
+
+        if let roleFilter = role {
+            let lowerFilter = roleFilter.lowercased()
+            allNodes = allNodes.filter { node in
+                node.role.lowercased() == lowerFilter ||
+                node.displayType.lowercased() == lowerFilter
+            }
+        }
+
+        if windowOnly {
+            allNodes = allNodes.filter { node in
+                // Exclude AXMenuBar, AXMenuBarItem, and AXApplication-level items
+                // Keep only items that would be descendants of AXWindow
+                let excludeRoles = Set(["AXMenuBar", "AXMenuBarItem", "AXApplication"])
+                if excludeRoles.contains(node.role) { return false }
+                return true
+            }
         }
 
         var elements: [(ref: String, node: AXNode)] = []
@@ -3817,14 +3988,480 @@ struct RecordFramesCommand: ParsableCommand {
     }
 }
 
+// MARK: - MenuBar
+
+struct MenuBarCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "menubar",
+        abstract: "Interact with menu bar items",
+        subcommands: [MenuBarListCommand.self, MenuBarOpenCommand.self]
+    )
+}
+
+struct MenuBarListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List menu bar items for connected app")
+
+    @OptionGroup var globals: GlobalOptions
+
+    struct MenuBarItem: Codable {
+        let ref: String
+        let title: String?
+        let role: String
+        let enabled: Bool
+        let subrole: String?
+    }
+
+    struct MenuBarListResult: Codable {
+        let items: [MenuBarItem]
+        let source: String
+    }
+
+    func run() throws {
+        let session = SessionStore().load()
+
+        guard session.isConnected, let pid = session.pid else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        guard AXClient.isProcessRunning(pid: pid) else {
+            Output.printError(code: "APP_NOT_RUNNING", message: "Target app (PID \(pid)) is no longer running",
+                            hint: "Reconnect with: agent-swift connect", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        var items: [MenuBarItem] = []
+        var refIndex = 1
+
+        // Walk the app's AX tree for menu bar items
+        let root = AXClient.appElement(pid: pid)
+        let tree = AXClient.walkTree(element: root)
+        let allNodes = AXClient.flattenTree(tree)
+        let menuNodes = allNodes.filter { node in
+            let menuRoles = Set(["AXMenuBar", "AXMenuBarItem", "AXMenuItem", "AXMenu"])
+            return menuRoles.contains(node.role)
+        }
+
+        for node in menuNodes {
+            items.append(MenuBarItem(
+                ref: "@e\(refIndex)",
+                title: node.displayLabel?.isEmpty == false ? node.displayLabel : nil,
+                role: node.role,
+                enabled: node.enabled,
+                subrole: node.subrole
+            ))
+            refIndex += 1
+        }
+
+        // Also check system-wide for status items owned by this app
+        let systemWide = AXUIElementCreateSystemWide()
+        var systemMenuCount = 0
+        // Try to find status items via the app's menu bar 2 (status bar area)
+        var menuBars: CFTypeRef?
+        AXUIElementCopyAttributeValue(root, "AXExtrasMenuBar" as CFString, &menuBars)
+        if let extras = menuBars {
+            let extrasElement = extras as! AXUIElement
+            let extrasTree = AXClient.walkTree(element: extrasElement)
+            let extrasNodes = AXClient.flattenTree(extrasTree)
+            for node in extrasNodes {
+                items.append(MenuBarItem(
+                    ref: "@e\(refIndex)",
+                    title: node.displayLabel?.isEmpty == false ? node.displayLabel : nil,
+                    role: node.role,
+                    enabled: node.enabled,
+                    subrole: node.subrole
+                ))
+                refIndex += 1
+                systemMenuCount += 1
+            }
+        }
+        _ = systemWide
+
+        let result = MenuBarListResult(
+            items: items,
+            source: systemMenuCount > 0 ? "app+extras" : "app"
+        )
+
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            if items.isEmpty {
+                print("No menu bar items found")
+            } else {
+                for item in items {
+                    let enabledStr = item.enabled ? "" : " [disabled]"
+                    print("\(item.ref) [\(item.role)] \"\(item.title ?? "")\" \(enabledStr)")
+                }
+            }
+        }
+    }
+}
+
+struct MenuBarOpenCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "open", abstract: "Open a menu bar item by ref or title")
+
+    @OptionGroup var globals: GlobalOptions
+
+    @Argument(help: "Ref (@eN) or title of menu bar item to open")
+    var target: String
+
+    struct MenuBarOpenResult: Codable {
+        let opened: String
+        let menuItems: [MenuBarListCommand.MenuBarItem]
+    }
+
+    func run() throws {
+        let store = SessionStore()
+        var session = store.load()
+
+        guard session.isConnected, let pid = session.pid else {
+            Output.printError(code: "NOT_CONNECTED", message: "No active session",
+                            hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        guard AXClient.isProcessRunning(pid: pid) else {
+            Output.printError(code: "APP_NOT_RUNNING", message: "Target app (PID \(pid)) is no longer running",
+                            hint: "Reconnect with: agent-swift connect", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        let root = AXClient.appElement(pid: pid)
+
+        // If target is @eN ref, use resolveRef to get the actual AXUIElement
+        if target.hasPrefix("@e") || target.hasPrefix("e") {
+            let resolved = try resolveRef(target.hasPrefix("@") ? target : "@\(target)",
+                                          session: session, pid: pid, useJson: globals.useJson)
+
+            let pressResult = AXUIElementPerformAction(resolved.element, kAXPressAction as CFString)
+            guard pressResult == .success else {
+                Output.printError(code: "ACTION_FAILED", message: "Failed to press menu item: \(target)",
+                                hint: "Item may not support AXPress action", useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+
+            Thread.sleep(forTimeInterval: 0.2)
+
+            // Re-walk to get expanded menu items
+            let newTree = AXClient.walkTree(element: root)
+            let newAllNodes = AXClient.flattenTree(newTree)
+            let newMenuItems = newAllNodes.filter { n in
+                n.role == "AXMenuItem" || n.role == "AXMenuItemCheckbox" || n.role == "AXMenuItemRadio"
+            }
+
+            var resultItems: [MenuBarListCommand.MenuBarItem] = []
+            var refs: [String: SessionData.RefEntry] = session.refs
+            let startIdx = (refs.count) + 1
+
+            for (i, item) in newMenuItems.enumerated() {
+                let ref = "e\(startIdx + i)"
+                resultItems.append(MenuBarListCommand.MenuBarItem(
+                    ref: "@\(ref)",
+                    title: item.displayLabel?.isEmpty == false ? item.displayLabel : nil,
+                    role: item.role,
+                    enabled: item.enabled,
+                    subrole: item.subrole
+                ))
+                refs[ref] = item.toRefEntry()
+            }
+
+            session.refs = refs
+            session.lastSnapshotAt = ISO8601DateFormatter().string(from: Date())
+            try store.save(session)
+
+            let result = MenuBarOpenResult(
+                opened: resolved.node.displayLabel ?? target,
+                menuItems: resultItems
+            )
+
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("Opened: \(resolved.node.displayLabel ?? target)")
+                for item in resultItems {
+                    let enabledStr = item.enabled ? "" : " [disabled]"
+                    print("  \(item.ref) [\(item.role)] \"\(item.title ?? "")\"\(enabledStr)")
+                }
+            }
+            return
+        }
+
+        // Title-based search: collect AXUIElement objects alongside AXNode objects
+        let tree = AXClient.walkTree(element: root)
+        let allNodes = AXClient.flattenTree(tree)
+
+        // Collect elements in the same order as flattenTree
+        var elements: [AXUIElement] = []
+        AXClient.collectElements(element: root, interactiveOnly: false, into: &elements)
+
+        // Search in main tree nodes
+        let lowerTarget = target.lowercased()
+        var targetElement: AXUIElement? = nil
+        var matchedLabel: String = target
+
+        for (i, node) in allNodes.enumerated() {
+            let menuRoles = Set(["AXMenuBarItem", "AXMenuItem"])
+            guard menuRoles.contains(node.role) else { continue }
+            if node.displayLabel?.lowercased() == lowerTarget ||
+               node.title?.lowercased() == lowerTarget {
+                if i < elements.count {
+                    targetElement = elements[i]
+                    matchedLabel = node.displayLabel ?? target
+                }
+                break
+            }
+        }
+
+        // Also check extras menu bar if not found
+        if targetElement == nil {
+            var menuBars: CFTypeRef?
+            AXUIElementCopyAttributeValue(root, "AXExtrasMenuBar" as CFString, &menuBars)
+            if let extras = menuBars {
+                let extrasElement = extras as! AXUIElement
+                let extrasTree = AXClient.walkTree(element: extrasElement)
+                let extrasNodes = AXClient.flattenTree(extrasTree)
+
+                var extrasElements: [AXUIElement] = []
+                AXClient.collectElements(element: extrasElement, interactiveOnly: false, into: &extrasElements)
+
+                for (i, node) in extrasNodes.enumerated() {
+                    let menuRoles = Set(["AXMenuBarItem", "AXMenuItem"])
+                    guard menuRoles.contains(node.role) else { continue }
+                    if node.displayLabel?.lowercased() == lowerTarget ||
+                       node.title?.lowercased() == lowerTarget {
+                        if i < extrasElements.count {
+                            targetElement = extrasElements[i]
+                            matchedLabel = node.displayLabel ?? target
+                        }
+                        break
+                    }
+                }
+            }
+        }
+
+        guard let element = targetElement else {
+            Output.printError(code: "NOT_FOUND", message: "Menu bar item not found: \(target)",
+                            hint: "Run: agent-swift menubar list", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Perform AXPress to open the menu
+        let pressResult = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        guard pressResult == .success else {
+            Output.printError(code: "ACTION_FAILED", message: "Failed to press menu item: \(target)",
+                            hint: "Item may not support AXPress action", useJson: globals.useJson)
+            throw ExitCode(2)
+        }
+
+        // Brief pause for menu to expand
+        Thread.sleep(forTimeInterval: 0.2)
+
+        // Re-walk to get expanded menu items
+        let newTree = AXClient.walkTree(element: root)
+        let newAllNodes = AXClient.flattenTree(newTree)
+        let newMenuItems = newAllNodes.filter { n in
+            n.role == "AXMenuItem" || n.role == "AXMenuItemCheckbox" || n.role == "AXMenuItemRadio"
+        }
+
+        var resultItems: [MenuBarListCommand.MenuBarItem] = []
+        var refs: [String: SessionData.RefEntry] = session.refs
+        let startIdx = (refs.count) + 1
+
+        for (i, item) in newMenuItems.enumerated() {
+            let ref = "e\(startIdx + i)"
+            resultItems.append(MenuBarListCommand.MenuBarItem(
+                ref: "@\(ref)",
+                title: item.displayLabel?.isEmpty == false ? item.displayLabel : nil,
+                role: item.role,
+                enabled: item.enabled,
+                subrole: item.subrole
+            ))
+            refs[ref] = item.toRefEntry()
+        }
+
+        session.refs = refs
+        session.lastSnapshotAt = ISO8601DateFormatter().string(from: Date())
+        try store.save(session)
+
+        let result = MenuBarOpenResult(
+            opened: matchedLabel,
+            menuItems: resultItems
+        )
+
+        if globals.useJson {
+            print(Output.json(result))
+        } else {
+            print("Opened: \(matchedLabel)")
+            for item in resultItems {
+                let enabledStr = item.enabled ? "" : " [disabled]"
+                print("  \(item.ref) [\(item.role)] \"\(item.title ?? "")\"\(enabledStr)")
+            }
+        }
+    }
+}
+
+// MARK: - Collect Artifacts
+
+struct CollectArtifactsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "collect-artifacts", abstract: "Collect diagnostic artifacts (doctor, status, snapshot, screenshot)")
+
+    @OptionGroup var globals: GlobalOptions
+
+    @Option(name: .long, help: "Bundle ID to connect to (if not already connected)")
+    var bundleId: String?
+
+    @Option(name: .long, help: "Output directory (default: /tmp/agent-swift-artifacts-<timestamp>)")
+    var out: String?
+
+    struct ArtifactFile: Codable {
+        let name: String
+        let path: String
+        let size: Int
+        var error: String?
+    }
+
+    struct ArtifactManifest: Codable {
+        let timestamp: String
+        let version: String
+        let bundleId: String?
+        let pid: Int?
+        let directory: String
+        let files: [ArtifactFile]
+    }
+
+    func run() throws {
+        let session = SessionStore().load()
+
+        // Resolve connection
+        var activePid = session.pid
+        var activeBundleId = session.bundleId
+
+        if !session.isConnected {
+            if let bid = bundleId {
+                if let pid = AXClient.resolvePID(bundleId: bid) {
+                    activePid = pid
+                    activeBundleId = bid
+                } else {
+                    Output.printError(code: "APP_NOT_RUNNING", message: "App not running: \(bid)",
+                                    hint: "Launch the app first", useJson: globals.useJson)
+                    throw ExitCode(2)
+                }
+            } else {
+                Output.printError(code: "NOT_CONNECTED", message: "No active session and no --bundle-id provided",
+                                hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+        }
+
+        let ts = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let outDir = out ?? "/tmp/agent-swift-artifacts-\(ts)"
+        try FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+
+        var files: [ArtifactFile] = []
+
+        // 1. Doctor
+        do {
+            var checks: [DoctorCommand.Check] = []
+            let trusted = AXClient.isTrusted(prompt: false)
+            checks.append(DoctorCommand.Check(name: "accessibility", status: trusted ? "pass" : "fail",
+                                               message: trusted ? "Accessibility access granted" : "Accessibility access NOT granted"))
+            let skylight = SkyLightBridge.shared
+            checks.append(DoctorCommand.Check(name: "background_input", status: skylight.isAvailable ? "pass" : "warn",
+                                               message: skylight.isAvailable ? "SkyLight available" : "SkyLight not available"))
+            let doctorResult = DoctorCommand.DoctorResult(checks: checks, allPass: checks.allSatisfy { $0.status == "pass" })
+            let doctorJson = Output.json(doctorResult)
+            let doctorPath = "\(outDir)/doctor.json"
+            try doctorJson.write(toFile: doctorPath, atomically: true, encoding: .utf8)
+            let sz = try FileManager.default.attributesOfItem(atPath: doctorPath)[.size] as? Int ?? 0
+            files.append(ArtifactFile(name: "doctor.json", path: doctorPath, size: sz))
+        } catch {
+            files.append(ArtifactFile(name: "doctor.json", path: "\(outDir)/doctor.json", size: 0, error: error.localizedDescription))
+        }
+
+        // 2. Status
+        do {
+            let statusJson = Output.json(session)
+            let statusPath = "\(outDir)/status.json"
+            try statusJson.write(toFile: statusPath, atomically: true, encoding: .utf8)
+            let sz = try FileManager.default.attributesOfItem(atPath: statusPath)[.size] as? Int ?? 0
+            files.append(ArtifactFile(name: "status.json", path: statusPath, size: sz))
+        } catch {
+            files.append(ArtifactFile(name: "status.json", path: "\(outDir)/status.json", size: 0, error: error.localizedDescription))
+        }
+
+        // 3. Snapshot
+        do {
+            if let pid = activePid {
+                let root = AXClient.appElement(pid: pid)
+                let tree = AXClient.walkTree(element: root)
+                let allNodes = AXClient.flattenTree(tree).filter { $0.isInteractive }
+                var elements: [(ref: String, node: AXNode)] = []
+                for (i, node) in allNodes.enumerated() {
+                    elements.append((ref: "e\(i + 1)", node: node))
+                }
+                let snapshotJson = SnapshotFormatter.formatJson(elements: elements)
+                let snapshotPath = "\(outDir)/snapshot.json"
+                try snapshotJson.write(toFile: snapshotPath, atomically: true, encoding: .utf8)
+                let sz = try FileManager.default.attributesOfItem(atPath: snapshotPath)[.size] as? Int ?? 0
+                files.append(ArtifactFile(name: "snapshot.json", path: snapshotPath, size: sz))
+            }
+        } catch {
+            files.append(ArtifactFile(name: "snapshot.json", path: "\(outDir)/snapshot.json", size: 0, error: error.localizedDescription))
+        }
+
+        // 4. Screenshot
+        do {
+            let screenshotPath = "\(outDir)/screenshot.png"
+            if let pid = activePid {
+                let success = AXClient.captureScreenshot(pid: pid, path: screenshotPath)
+                if success {
+                    let sz = try FileManager.default.attributesOfItem(atPath: screenshotPath)[.size] as? Int ?? 0
+                    files.append(ArtifactFile(name: "screenshot.png", path: screenshotPath, size: sz))
+                } else {
+                    files.append(ArtifactFile(name: "screenshot.png", path: screenshotPath, size: 0, error: "Screenshot capture failed"))
+                }
+            }
+        } catch {
+            files.append(ArtifactFile(name: "screenshot.png", path: "\(outDir)/screenshot.png", size: 0, error: error.localizedDescription))
+        }
+
+        // Write manifest
+        let manifest = ArtifactManifest(
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            version: AgentSwift.configuration.version ?? "unknown",
+            bundleId: activeBundleId,
+            pid: activePid,
+            directory: outDir,
+            files: files
+        )
+
+        let manifestJson = Output.json(manifest)
+        let manifestPath = "\(outDir)/manifest.json"
+        try manifestJson.write(toFile: manifestPath, atomically: true, encoding: .utf8)
+
+        if globals.useJson {
+            print(manifestJson)
+        } else {
+            print("Artifacts collected in: \(outDir)")
+            for file in files {
+                let status = file.error == nil ? "✓" : "✗ \(file.error!)"
+                print("  \(file.name) (\(file.size) bytes) \(status)")
+            }
+        }
+    }
+}
+
 // MARK: - Schema
 
 // CommandSchema is defined in AgentSwiftLib/Output/CommandSchema.swift
 
 func allSchemas() -> [CommandSchema] { return [
     CommandSchema(name: "doctor", description: "Check prerequisites and diagnose issues",
-        args: [], flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
-        exitCodes: ["0": "success", "2": "error"]),
+        args: [], flags: [
+            .init(name: "--target-app", type: "string", defaultValue: nil),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "connect", description: "Connect to a macOS app, iOS Simulator, or iPhone Mirroring",
         args: [], flags: [
             .init(name: "--pid", type: "int", defaultValue: nil),
@@ -3845,6 +4482,10 @@ func allSchemas() -> [CommandSchema] { return [
         args: [], flags: [
             .init(name: "-i", type: "bool", defaultValue: "false"),
             .init(name: "--all", type: "bool", defaultValue: "false"),
+            .init(name: "--visible-only", type: "bool", defaultValue: "false"),
+            .init(name: "--nonzero-bounds", type: "bool", defaultValue: "false"),
+            .init(name: "--role", type: "string", defaultValue: nil),
+            .init(name: "--window-only", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "press", description: "Press element by ref",
@@ -3927,6 +4568,16 @@ func allSchemas() -> [CommandSchema] { return [
             .init(name: "--keyframes", type: "bool", defaultValue: "false"),
             .init(name: "--every", type: "number", defaultValue: nil),
             .init(name: "--output-dir", type: "string", defaultValue: nil),
+            .init(name: "--json", type: "bool", defaultValue: "false")
+        ], exitCodes: ["0": "success", "2": "error"]),
+    CommandSchema(name: "menubar", description: "Interact with menu bar items (list/open). Use 'menubar list' to discover items, 'menubar open <ref-or-title>' to expand a menu and get its items.",
+        args: [.init(name: "subcommand", type: "string", required: true)],
+        flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
+        exitCodes: ["0": "success", "2": "error"]),
+    CommandSchema(name: "collect-artifacts", description: "Collect diagnostic artifacts (doctor, status, snapshot, screenshot) into a directory",
+        args: [], flags: [
+            .init(name: "--bundle-id", type: "string", defaultValue: nil),
+            .init(name: "--out", type: "string", defaultValue: nil),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "schema", description: "Show command schema",

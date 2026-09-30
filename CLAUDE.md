@@ -1,6 +1,6 @@
 # CLAUDE.md — agent-swift contributors
 
-Contributor reference for `agent-swift` (`v0.2.1`).
+Contributor reference for `agent-swift` (`v0.10.0`).
 
 ## What this project is
 
@@ -14,12 +14,12 @@ Core model:
 4. verify/read (`get/is/wait`)
 5. `disconnect`
 
-## Quick Command Reference (15)
+## Quick Command Reference (18)
 
 | Command | Purpose | Example |
 |---|---|---|
 | `doctor` | Check AX trust and host readiness | `agent-swift doctor` |
-| `connect` | Connect by PID or bundle ID | `agent-swift connect --bundle-id com.apple.TextEdit` |
+| `connect` | Connect by PID, bundle ID, `--sim`, `--mirror`, or `--udid` | `agent-swift connect --bundle-id com.apple.TextEdit` |
 | `disconnect` | Clear session | `agent-swift disconnect` |
 | `status` | Show session state | `agent-swift status` |
 | `snapshot` | Capture tree and assign refs | `agent-swift snapshot -i` |
@@ -27,11 +27,14 @@ Core model:
 | `click` | CGEvent click by ref or coordinates | `agent-swift click @e1` |
 | `fill` | Set text into element | `agent-swift fill @e2 "hello"` |
 | `get` | Read element property | `agent-swift get attrs @e2` |
-| `find` | Locate element + optional chained action | `agent-swift find text Save press` |
+| `find` | Locate by role, text, identifier, label, or value + action | `agent-swift find text Save press` |
 | `screenshot` | Capture app screenshot | `agent-swift screenshot /tmp/app.png` |
 | `is` | Assertion (`exists/visible/enabled/focused`) | `agent-swift is exists @e1` |
 | `wait` | Poll for condition or delay | `agent-swift wait text "Saved" --timeout 8000` |
 | `scroll` | Scroll direction or ref into view | `agent-swift scroll down --amount 6` |
+| `type` | Type text via CGEvent keyboard | `agent-swift type "Hello"` |
+| `swipe` | Swipe gesture in a direction | `agent-swift swipe left` |
+| `record` | Record session for replay/evidence | `agent-swift record start` |
 | `schema` | Command metadata JSON | `agent-swift schema` |
 
 ## Project Structure
