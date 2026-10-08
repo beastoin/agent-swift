@@ -149,11 +149,15 @@ public struct IdbBridge {
     }
 
     public func enableAccessibility() throws {
-        let (output, exitCode) = SimulatorBridge.runSimctl([
+        // Use timeout variant — simctl spawn can hang on iOS 26+ simulators
+        let (output, exitCode) = SimulatorBridge.runSimctlWithTimeout([
             "spawn", udid, "defaults", "write",
             "com.apple.Accessibility", "ApplicationAccessibilityEnabled", "-bool", "true"
-        ])
+        ], timeout: 10)
         guard exitCode == 0 else {
+            if exitCode == 124 {
+                throw IdbError.commandFailed("simctl spawn timed out (iOS 26 known issue)")
+            }
             throw IdbError.commandFailed("Failed to enable accessibility: \(output)")
         }
     }

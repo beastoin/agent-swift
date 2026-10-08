@@ -9,7 +9,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.12.0",
+        version: "0.13.0",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -2574,7 +2574,24 @@ struct TypeCommand: ParsableCommand {
                 }
             }
 
-            // Fallback: use CGEvent key-by-key typing
+            // If connected to Simulator in desktop mode, use pasteboard
+            // (CGEvent virtualKey: 0 maps to 'a' in Simulator)
+            if session.bundleId == "com.apple.iphonesimulator",
+               let booted = try? SimulatorBridge.bootedDevice() {
+                do {
+                    try booted.typeViaPasteboard(text: text)
+                    if globals.useJson {
+                        print(Output.json(TypeResult(typed: text, success: true, method: "pasteboard", delivery: "foreground")))
+                    } else {
+                        print("Typed \"\(text)\" (via pasteboard)")
+                    }
+                    return
+                } catch {
+                    // Fall through to CGEvent for non-Simulator apps
+                }
+            }
+
+            // Fallback: use CGEvent key-by-key typing (works for regular macOS apps)
             if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
                 app.activate()
                 Thread.sleep(forTimeInterval: 0.1)
@@ -2615,18 +2632,19 @@ struct TypeCommand: ParsableCommand {
             }
         }
 
-        // Use CGEvent keyboard through Simulator window
-        let simAX = SimAXBridge(udid: udid)
+        // Use pasteboard-based typing (pbcopy + Cmd+V) — CGEvent key codes
+        // don't work for Simulator because it reads virtualKey not unicode string
+        let bridge = SimulatorBridge(udid: udid)
         do {
-            try simAX.typeViaCGEvent(text: text)
+            try bridge.typeViaPasteboard(text: text)
             if globals.useJson {
-                print(Output.json(TypeResult(typed: text, success: true, method: "cgevent")))
+                print(Output.json(TypeResult(typed: text, success: true, method: "pasteboard")))
             } else {
-                print("Typed \"\(text)\" (via keystroke)")
+                print("Typed \"\(text)\" (via pasteboard)")
             }
-        } catch let axError {
+        } catch let pbError {
             Output.printError(code: "SIM_TYPE_FAILED",
-                            message: "Type failed: \(axError)",
+                            message: "Type failed: \(pbError)",
                             hint: "Ensure Simulator.app is running and focused",
                             useJson: globals.useJson)
             throw ExitCode(2)

@@ -302,6 +302,52 @@ public struct SimulatorBridge {
         }
     }
 
+    #if canImport(AppKit)
+    /// Type text into the simulator via pasteboard + Cmd+V.
+    /// Reliable alternative to CGEvent key-by-key typing, which fails in Simulator
+    /// because Simulator reads virtual key codes (all map to 'a' with virtualKey: 0).
+    public func typeViaPasteboard(text: String) throws {
+        // Step 1: Set text on the simulator's pasteboard via simctl pbcopy
+        let pbProcess = Process()
+        pbProcess.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        pbProcess.arguments = ["simctl", "pbcopy", udid]
+        let inputPipe = Pipe()
+        pbProcess.standardInput = inputPipe
+        let outPipe = Pipe()
+        pbProcess.standardOutput = outPipe
+        pbProcess.standardError = outPipe
+        do {
+            try pbProcess.run()
+            if let data = text.data(using: .utf8) {
+                inputPipe.fileHandleForWriting.write(data)
+            }
+            inputPipe.fileHandleForWriting.closeFile()
+            pbProcess.waitUntilExit()
+        } catch {
+            throw SimulatorError.simctlFailed("pbcopy failed: \(error)")
+        }
+        guard pbProcess.terminationStatus == 0 else {
+            let errMsg = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw SimulatorError.simctlFailed("pbcopy failed: \(errMsg.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+
+        // Step 2: Activate Simulator and send Cmd+V to paste
+        Self.activateSimulator()
+
+        let src = CGEventSource(stateID: .hidSystemState)
+        // virtualKey 9 = kVK_ANSI_V
+        if let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),
+           let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) {
+            keyDown.flags = .maskCommand
+            keyUp.flags = .maskCommand
+            keyDown.post(tap: .cgSessionEventTap)
+            Thread.sleep(forTimeInterval: 0.05)
+            keyUp.post(tap: .cgSessionEventTap)
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+    #endif
+
     // MARK: - Internal
 
     static func runSimctl(_ args: [String]) -> (String, Int32) {
@@ -318,6 +364,46 @@ public struct SimulatorBridge {
         } catch {
             return ("Failed to run xcrun simctl: \(error)", 1)
         }
+        let stdout = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (stdout.isEmpty ? stderr : stdout, process.terminationStatus)
+    }
+
+    /// Run simctl with a timeout — terminates the process if it exceeds the limit.
+    /// Returns exit code 124 on timeout (matching timeout(1) convention).
+    static func runSimctlWithTimeout(_ args: [String], timeout: TimeInterval = 10) -> (String, Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl"] + args
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            return ("Failed to run xcrun simctl: \(error)", 1)
+        }
+
+        // Fire a timer on a dispatch queue to kill the process if it hangs
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        timer.schedule(deadline: .now() + timeout)
+        var timedOut = false
+        timer.setEventHandler {
+            if process.isRunning {
+                timedOut = true
+                process.terminate()
+            }
+        }
+        timer.resume()
+
+        process.waitUntilExit()
+        timer.cancel()
+
+        if timedOut {
+            return ("simctl command timed out after \(Int(timeout))s", 124)
+        }
+
         let stdout = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return (stdout.isEmpty ? stderr : stdout, process.terminationStatus)

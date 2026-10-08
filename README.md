@@ -4,7 +4,7 @@ Native Swift CLI for AI agents to control macOS apps through the Accessibility A
 
 `agent-swift` gives Claude, GPT, and other agents one interface to automate native macOS UI: inspect elements, click buttons, fill fields, take screenshots, assert conditions, and wait for state changes.
 
-Version: `0.2.1`
+Version: `0.10.0`
 
 ![demo](assets/e2e-demo.gif)
 
@@ -36,6 +36,9 @@ cp .build/release/agent-swift /usr/local/bin/
 1. macOS 13+
 2. Accessibility permission for your terminal/agent process (System Settings > Privacy & Security > Accessibility)
 3. Target app is running
+4. **For simulator mode:** `xcrun simctl` (ships with Xcode), `idb` (Facebook's iOS Development Bridge)
+5. **For recording:** `ffmpeg` and `ffprobe` (for video capture and frame processing)
+6. **For mirror mode:** `screencapture` (built into macOS)
 
 ## Quick Start
 
@@ -61,12 +64,12 @@ agent-swift screenshot /tmp/agent-swift.png
 agent-swift disconnect
 ```
 
-## Commands (15)
+## Commands (18)
 
 | Command | Description | Example |
 |---|---|---|
 | `doctor` | Check prerequisites and connection health | `agent-swift doctor` |
-| `connect` | Connect by PID or bundle ID | `agent-swift connect --bundle-id com.apple.TextEdit` |
+| `connect` | Connect by PID, bundle ID, `--sim`, `--mirror`, or `--udid` | `agent-swift connect --bundle-id com.apple.TextEdit` |
 | `disconnect` | Clear session | `agent-swift disconnect` |
 | `status` | Show current session and refs count | `agent-swift status` |
 | `snapshot` | Capture AX tree and generate `@eN` refs | `agent-swift snapshot -i` |
@@ -74,12 +77,24 @@ agent-swift disconnect
 | `click` | Direct CGEvent click by ref or coordinates | `agent-swift click @e3` / `agent-swift click 640 420` |
 | `fill` | Set text value on element | `agent-swift fill @e2 "Draft title"` |
 | `get` | Read `text`, `type`, `role`, `identifier`, or `attrs` | `agent-swift get text @e2` |
-| `find` | Locate by `role`, `text`, or `identifier`; optional chained action | `agent-swift find text Save press` |
+| `find` | Locate by `role`, `text`, `identifier`, `label`, or `value`; optional chained action | `agent-swift find text Save press` |
 | `screenshot` | Capture app window screenshot | `agent-swift screenshot /tmp/app.png` |
 | `is` | Assertion command (`exists`, `visible`, `enabled`, `focused`) | `agent-swift is enabled @e4` |
 | `wait` | Wait for condition (`exists`, `visible`, `text`, `gone`) or delay ms | `agent-swift wait text "Saved" --timeout 8000` |
 | `scroll` | Scroll direction (`up/down`) or scroll ref into view | `agent-swift scroll down --amount 8` |
+| `type` | Type text via CGEvent keyboard simulation | `agent-swift type "Hello world"` |
+| `swipe` | Swipe gesture in a direction | `agent-swift swipe left` |
+| `record` | Record session events for replay/evidence | `agent-swift record start` |
 | `schema` | Output machine-readable command schema | `agent-swift schema` |
+
+### Connect modes
+
+| Mode | Flag | Description |
+|---|---|---|
+| AX (local app) | `--bundle-id` or `--pid` | Direct Accessibility API connection to running macOS app |
+| Simulator | `--sim` | Connect to iOS Simulator via idb (requires `idb` + `simctl`) |
+| Mirror | `--mirror` | Mirror mode via CGEvent — sends clicks to Simulator window |
+| UDID | `--udid <device-udid>` | Connect to specific simulator by UDID |
 
 ### Global flags
 

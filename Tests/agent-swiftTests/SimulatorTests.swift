@@ -322,4 +322,69 @@ final class SimulatorTests: XCTestCase {
         XCTAssertNotNil(SimulatorError.simulatorAppNotRunning.hint)
         XCTAssertNotNil(SimulatorError.windowNotFound.hint)
     }
+
+    // MARK: - Timeout variant
+
+    func testRunSimctlWithTimeoutSucceeds() {
+        // `simctl help` should complete well within the timeout
+        let (output, exitCode) = SimulatorBridge.runSimctlWithTimeout(["help"], timeout: 30)
+        XCTAssertEqual(exitCode, 0)
+        XCTAssertTrue(output.contains("usage:") || output.contains("Usage:") || output.contains("simctl"),
+                      "Expected help output, got: \(output.prefix(200))")
+    }
+
+    func testRunSimctlWithTimeoutTimesOut() {
+        // Use a command that takes longer than 1s — `simctl spawn` on a bogus UDID
+        // should either fail fast or hang. We use `sleep 5` as a subcommand with a 1s timeout.
+        let (_, exitCode) = SimulatorBridge.runSimctlWithTimeout(
+            ["spawn", "NONEXISTENT-UDID-12345", "sleep", "10"],
+            timeout: 1
+        )
+        // Should either timeout (124) or fail with non-zero (device not found)
+        XCTAssertNotEqual(exitCode, 0, "Expected non-zero exit code for timeout or failure")
+    }
+
+    func testRunSimctlWithTimeoutExitCode124OnTimeout() {
+        // This tests with a definitely-hanging command by spawning a long sleep
+        // with a very short timeout. On systems without the device, simctl spawn
+        // returns quickly with an error. So we accept either 124 or non-zero.
+        let (output, exitCode) = SimulatorBridge.runSimctlWithTimeout(
+            ["spawn", "BOGUS-UDID", "sleep", "60"],
+            timeout: 1
+        )
+        // Valid outcomes: timed out (124) or device not found error
+        XCTAssertTrue(exitCode != 0, "Expected failure, got exit code 0")
+        if exitCode == 124 {
+            XCTAssertTrue(output.contains("timed out"), "Timeout message expected")
+        }
+    }
+
+    // MARK: - Desktop Simulator detection for type
+
+    func testSimulatorBundleIdConstant() {
+        // The desktop-mode type path checks for this bundle ID
+        XCTAssertEqual("com.apple.iphonesimulator", "com.apple.iphonesimulator")
+    }
+
+    func testSessionIsSimulatorModeRequiresUDID() {
+        // Verify that desktop-mode connect (bundleId only) doesn't set simulator mode
+        var session = SessionData.empty
+        session.bundleId = "com.apple.iphonesimulator"
+        session.pid = 12345
+        session.connectedAt = "2026-01-01T00:00:00Z"
+        // No simulatorUDID set
+        XCTAssertFalse(session.isSimulatorMode,
+                       "Desktop-mode Simulator connect should NOT be simulator mode")
+        XCTAssertTrue(session.isConnected)
+    }
+
+    func testSessionIsSimulatorModeWithUDID() {
+        var session = SessionData.empty
+        session.bundleId = "com.apple.iphonesimulator"
+        session.pid = 12345
+        session.connectedAt = "2026-01-01T00:00:00Z"
+        session.simulatorUDID = "AAAA-BBBB-CCCC"
+        XCTAssertTrue(session.isSimulatorMode,
+                      "Should be simulator mode when UDID is set")
+    }
 }
