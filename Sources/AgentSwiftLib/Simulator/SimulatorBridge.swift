@@ -322,9 +322,23 @@ public struct SimulatorBridge {
                 inputPipe.fileHandleForWriting.write(data)
             }
             inputPipe.fileHandleForWriting.closeFile()
-            pbProcess.waitUntilExit()
         } catch {
             throw SimulatorError.simctlFailed("pbcopy failed: \(error)")
+        }
+
+        // Timeout safety: kill pbcopy if it hangs (5s)
+        let pbTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        pbTimer.schedule(deadline: .now() + 5)
+        var pbTimedOut = false
+        pbTimer.setEventHandler {
+            if pbProcess.isRunning { pbTimedOut = true; pbProcess.terminate() }
+        }
+        pbTimer.resume()
+        pbProcess.waitUntilExit()
+        pbTimer.cancel()
+
+        if pbTimedOut {
+            throw SimulatorError.simctlFailed("pbcopy timed out after 5s")
         }
         guard pbProcess.terminationStatus == 0 else {
             let errMsg = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -350,28 +364,11 @@ public struct SimulatorBridge {
 
     // MARK: - Internal
 
-    static func runSimctl(_ args: [String]) -> (String, Int32) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["simctl"] + args
-        let pipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = errPipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return ("Failed to run xcrun simctl: \(error)", 1)
-        }
-        let stdout = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return (stdout.isEmpty ? stderr : stdout, process.terminationStatus)
-    }
-
-    /// Run simctl with a timeout — terminates the process if it exceeds the limit.
-    /// Returns exit code 124 on timeout (matching timeout(1) convention).
-    static func runSimctlWithTimeout(_ args: [String], timeout: TimeInterval = 10) -> (String, Int32) {
+    /// Run simctl with async pipe reading and a timeout safety net.
+    /// Reads pipes on background threads to avoid pipe-buffer deadlock
+    /// (if output exceeds ~64KB, waitUntilExit + post-wait read deadlocks).
+    /// Default timeout: 30s. Returns exit code 124 on timeout.
+    public static func runSimctl(_ args: [String], timeout: TimeInterval = 30) -> (String, Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
         process.arguments = ["simctl"] + args
@@ -385,13 +382,30 @@ public struct SimulatorBridge {
             return ("Failed to run xcrun simctl: \(error)", 1)
         }
 
-        // Fire a timer on a dispatch queue to kill the process if it hangs
+        // Read pipes on background threads to prevent pipe-buffer deadlock
+        let group = DispatchGroup()
+        var stdoutData = Data()
+        var stderrData = Data()
+
+        group.enter()
+        DispatchQueue.global().async {
+            stdoutData = pipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global().async {
+            stderrData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+
+        // Timeout safety: kill the process if it exceeds the limit
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         timer.schedule(deadline: .now() + timeout)
-        var timedOut = false
+        let timedOut = UnsafeMutablePointer<Bool>.allocate(capacity: 1)
+        timedOut.initialize(to: false)
         timer.setEventHandler {
             if process.isRunning {
-                timedOut = true
+                timedOut.pointee = true
                 process.terminate()
             }
         }
@@ -399,17 +413,26 @@ public struct SimulatorBridge {
 
         process.waitUntilExit()
         timer.cancel()
+        group.wait()
 
-        if timedOut {
+        let didTimeout = timedOut.pointee
+        timedOut.deallocate()
+
+        if didTimeout {
             return ("simctl command timed out after \(Int(timeout))s", 124)
         }
 
-        let stdout = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         return (stdout.isEmpty ? stderr : stdout, process.terminationStatus)
     }
 
-    static func parseDeviceList(_ data: Data) throws -> [SimDeviceInfo] {
+    /// Convenience: run simctl with a shorter timeout for best-effort calls.
+    public static func runSimctlWithTimeout(_ args: [String], timeout: TimeInterval = 10) -> (String, Int32) {
+        return runSimctl(args, timeout: timeout)
+    }
+
+    public static func parseDeviceList(_ data: Data) throws -> [SimDeviceInfo] {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let devicesByRuntime = json["devices"] as? [String: [[String: Any]]] else {
             throw SimulatorError.simctlFailed("Invalid device list JSON")

@@ -9,7 +9,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.13.0",
+        version: "0.13.1",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -474,38 +474,64 @@ struct ConnectCommand: ParsableCommand {
     }
 
     private func connectSimulator(store: SessionStore, now: String) throws {
-        let bridge: SimulatorBridge
-        let resolvedUdid = udid ?? simulator
-        do {
-            if let udid = resolvedUdid, !udid.isEmpty {
-                bridge = try SimulatorBridge.device(udid: udid)
-            } else {
-                bridge = try SimulatorBridge.bootedDevice()
-            }
-        } catch let error as SimulatorError {
-            Output.printError(code: error.code, message: error.description,
-                            hint: error.hint, useJson: globals.useJson)
-            throw ExitCode(2)
-        }
-
         guard SimulatorBridge.isSimulatorRunning() else {
             Output.printError(code: "SIM_APP_NOT_RUNNING", message: "Simulator.app is not running",
                             hint: "Open Simulator: open -a Simulator", useJson: globals.useJson)
             throw ExitCode(2)
         }
 
-        let idb = IdbBridge(udid: bridge.udid)
+        // Resolve the simulator UDID — use short timeout to avoid hangs
+        let resolvedUdid: String
+        let resolvedName: String?
+        if let providedUdid = udid ?? simulator, !providedUdid.isEmpty {
+            // User provided UDID — trust it, quick-check if booted
+            resolvedUdid = providedUdid
+            let (listOut, listExit) = SimulatorBridge.runSimctl(
+                ["list", "devices", "booted", "-j"], timeout: 10)
+            if listExit == 0, let data = listOut.data(using: .utf8),
+               let devices = try? SimulatorBridge.parseDeviceList(data),
+               let device = devices.first(where: { $0.udid == providedUdid }) {
+                resolvedName = device.name
+                if !device.isBooted {
+                    Output.printError(code: "SIM_NOT_BOOTED",
+                                    message: "Simulator device is not booted: \(providedUdid)",
+                                    hint: "Boot this device: xcrun simctl boot \(providedUdid)",
+                                    useJson: globals.useJson)
+                    throw ExitCode(2)
+                }
+            } else {
+                // simctl timed out or device not in booted list — proceed anyway
+                resolvedName = nil
+            }
+        } else {
+            // Auto-detect booted device with short timeout
+            let (listOut, listExit) = SimulatorBridge.runSimctl(
+                ["list", "devices", "booted", "-j"], timeout: 10)
+            guard listExit == 0, let data = listOut.data(using: .utf8),
+                  let devices = try? SimulatorBridge.parseDeviceList(data),
+                  let booted = devices.first(where: { $0.isBooted }) else {
+                Output.printError(code: "SIM_NO_BOOTED",
+                                message: "No booted iOS Simulator found (or simctl timed out)",
+                                hint: "Boot a simulator: xcrun simctl boot <udid>",
+                                useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+            resolvedUdid = booted.udid
+            resolvedName = booted.name
+        }
+
+        // Best-effort accessibility enablement (10s timeout)
+        let idb = IdbBridge(udid: resolvedUdid)
         try? idb.enableAccessibility()
 
-        let info = try? bridge.deviceInfo()
         let simPid = AXClient.resolvePID(bundleId: "com.apple.iphonesimulator")
 
         var session = SessionData.empty
         session.pid = simPid
         session.bundleId = "com.apple.iphonesimulator"
         session.connectedAt = now
-        session.simulatorUDID = bridge.udid
-        session.simulatorDeviceType = info?.name
+        session.simulatorUDID = resolvedUdid
+        session.simulatorDeviceType = resolvedName
 
         try store.save(session)
 
@@ -515,12 +541,12 @@ struct ConnectCommand: ParsableCommand {
 
         let result = ConnectResult(connected: true, pid: simPid, bundleId: "com.apple.iphonesimulator",
                                    connectedAt: now, mode: "simulator",
-                                   simulatorUDID: bridge.udid, simulatorDeviceType: info?.name)
+                                   simulatorUDID: resolvedUdid, simulatorDeviceType: resolvedName)
 
         if globals.useJson {
             print(Output.json(result))
         } else {
-            print("Connected to Simulator: \(info?.name ?? bridge.udid)")
+            print("Connected to Simulator: \(resolvedName ?? resolvedUdid)")
         }
     }
 
@@ -2576,19 +2602,28 @@ struct TypeCommand: ParsableCommand {
 
             // If connected to Simulator in desktop mode, use pasteboard
             // (CGEvent virtualKey: 0 maps to 'a' in Simulator)
-            if session.bundleId == "com.apple.iphonesimulator",
-               let booted = try? SimulatorBridge.bootedDevice() {
-                do {
-                    try booted.typeViaPasteboard(text: text)
-                    if globals.useJson {
-                        print(Output.json(TypeResult(typed: text, success: true, method: "pasteboard", delivery: "foreground")))
-                    } else {
-                        print("Typed \"\(text)\" (via pasteboard)")
+            if session.bundleId == "com.apple.iphonesimulator" {
+                // Quick detection: find booted UDID with short timeout
+                let (listOut, listExit) = SimulatorBridge.runSimctl(
+                    ["list", "devices", "booted", "-j"], timeout: 5)
+                if listExit == 0,
+                   let data = listOut.data(using: .utf8),
+                   let devices = try? SimulatorBridge.parseDeviceList(data),
+                   let booted = devices.first(where: { $0.isBooted }) {
+                    let bridge = SimulatorBridge(udid: booted.udid)
+                    do {
+                        try bridge.typeViaPasteboard(text: text)
+                        if globals.useJson {
+                            print(Output.json(TypeResult(typed: text, success: true, method: "pasteboard", delivery: "foreground")))
+                        } else {
+                            print("Typed \"\(text)\" (via pasteboard)")
+                        }
+                        return
+                    } catch {
+                        // Fall through to CGEvent
                     }
-                    return
-                } catch {
-                    // Fall through to CGEvent for non-Simulator apps
                 }
+                // If detection failed/timed out, warn — CGEvent will type 'a'
             }
 
             // Fallback: use CGEvent key-by-key typing (works for regular macOS apps)
