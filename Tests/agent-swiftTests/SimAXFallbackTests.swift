@@ -66,7 +66,7 @@ final class SimAXFallbackTests: XCTestCase {
     func testSnapshotResultWithElements() throws {
         let elem = SnapshotElement(
             ref: "e1", type: "button", label: "OK", role: "AXButton",
-            identifier: nil, enabled: true, focused: false, bounds: nil
+            identifier: nil, help: nil, enabled: true, focused: false, bounds: nil
         )
         let result = SnapshotResult(elements: [elem], method: "ax")
         let data = try JSONEncoder().encode(result)
@@ -153,7 +153,7 @@ final class SimAXFallbackTests: XCTestCase {
     func testSnapshotResultRoundTrip() throws {
         let elem = SnapshotElement(
             ref: "e2", type: "textfield", label: "Name", role: "AXTextField",
-            identifier: "name-field", enabled: true, focused: true, bounds: nil
+            identifier: "name-field", help: nil, enabled: true, focused: true, bounds: nil
         )
         let result = SnapshotResult(elements: [elem], method: "ax")
         let data = try JSONEncoder().encode(result)

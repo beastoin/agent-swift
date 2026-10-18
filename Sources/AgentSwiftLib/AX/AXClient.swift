@@ -161,6 +161,7 @@ public struct AXNode {
     public let subrole: String?
     public let title: String?
     public let axDescription: String?
+    public let help: String?
     public let value: String?
     public let identifier: String?
     public let childStaticText: String?
@@ -171,13 +172,14 @@ public struct AXNode {
     public let actions: [String]
     public let children: [AXNode]
 
-    public init(role: String, subrole: String?, title: String?, axDescription: String?, value: String?,
+    public init(role: String, subrole: String?, title: String?, axDescription: String?, help: String? = nil, value: String?,
                 identifier: String?, childStaticText: String?, enabled: Bool, focused: Bool,
                 position: CGPoint?, size: CGSize?, actions: [String], children: [AXNode]) {
         self.role = role
         self.subrole = subrole
         self.title = title
         self.axDescription = axDescription
+        self.help = help
         self.value = value
         self.identifier = identifier
         self.childStaticText = childStaticText
@@ -252,6 +254,7 @@ public class AXClient {
         let subrole: String? = attr(element, kAXSubroleAttribute)
         let title: String? = attr(element, kAXTitleAttribute)
         let axDescription: String? = attr(element, kAXDescriptionAttribute)
+        let help: String? = attr(element, kAXHelpAttribute)
         let rawValue: AnyObject? = {
             var v: AnyObject?
             AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &v)
@@ -314,6 +317,7 @@ public class AXClient {
             subrole: subrole,
             title: title,
             axDescription: axDescription,
+            help: help,
             value: value,
             identifier: identifier,
             childStaticText: childStaticText,

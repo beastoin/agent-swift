@@ -9,7 +9,7 @@ struct AgentSwift: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent-swift",
         abstract: "CLI for AI agents to control macOS apps via Accessibility API",
-        version: "0.13.1",
+        version: "0.14.1",
         subcommands: [
             DoctorCommand.self,
             ConnectCommand.self,
@@ -74,6 +74,9 @@ do {
 struct GlobalOptions: ParsableArguments {
     @Flag(name: .long, help: "Output JSON")
     var json = false
+
+    @Flag(name: .long, help: "Validate without executing (mutating commands only)")
+    var dryRun = false
 
     /// Resolved JSON mode: flag > env var > TTY detection
     var useJson: Bool {
@@ -745,6 +748,29 @@ struct SnapshotCommand: ParsableCommand {
     @Flag(name: .long, help: "Only window children (exclude menu bar, app-level items)")
     var windowOnly = false
 
+    @Option(name: .long, help: "Comma-separated fields to include (ref,type,label,role,identifier,help,enabled,focused,bounds)")
+    var fields: String?
+
+    @Flag(name: .long, help: "Output one JSON object per line (NDJSON)")
+    var ndjson = false
+
+    static let validFields: Set<String> = ["ref", "type", "label", "role", "identifier", "help", "enabled", "focused", "bounds"]
+
+    /// Parse and validate --fields; returns nil if no filtering requested
+    func resolveFieldSet() throws -> Set<String>? {
+        guard let fieldsStr = fields else { return nil }
+        let requested = Set(fieldsStr.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) })
+        let invalid = requested.subtracting(Self.validFields)
+        if !invalid.isEmpty {
+            Output.printError(code: "INVALID_INPUT",
+                            message: "Invalid field(s): \(invalid.sorted().joined(separator: ", "))",
+                            hint: "Valid fields: \(Self.validFields.sorted().joined(separator: ", "))",
+                            useJson: globals.useJson || ndjson)
+            throw ExitCode(2)
+        }
+        return requested.union(["ref"])
+    }
+
     func run() throws {
         let store = SessionStore()
         var session = store.load()
@@ -754,6 +780,9 @@ struct SnapshotCommand: ParsableCommand {
                             hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
             throw ExitCode(2)
         }
+
+        // Validate --fields if provided
+        let fieldSet = try resolveFieldSet()
 
         if session.isVphoneMode {
             try snapshotVphone(store: store, session: &session)
@@ -836,10 +865,12 @@ struct SnapshotCommand: ParsableCommand {
 
         try store.save(session)
 
-        if globals.useJson {
-            print(SnapshotFormatter.formatJson(elements: elements))
+        if ndjson {
+            print(SnapshotFormatter.formatNdjson(elements: elements, fields: fieldSet))
+        } else if globals.useJson {
+            print(SnapshotFormatter.formatJson(elements: elements, fields: fieldSet))
         } else {
-            print(SnapshotFormatter.formatHuman(elements: elements))
+            print(SnapshotFormatter.formatHuman(elements: elements, fields: fieldSet))
         }
     }
 
@@ -887,13 +918,16 @@ struct SnapshotCommand: ParsableCommand {
         session.snapshotMethod = method
         try store.save(session)
 
-        if globals.useJson {
-            print(SnapshotFormatter.formatJson(elements: elements, method: method))
+        let simFieldSet = try resolveFieldSet()
+        if ndjson {
+            print(SnapshotFormatter.formatNdjson(elements: elements, fields: simFieldSet))
+        } else if globals.useJson {
+            print(SnapshotFormatter.formatJson(elements: elements, method: method, fields: simFieldSet))
         } else {
             if method == "ax" {
                 print("(using AX fallback — idb unavailable)")
             }
-            print(SnapshotFormatter.formatHuman(elements: elements))
+            print(SnapshotFormatter.formatHuman(elements: elements, fields: simFieldSet))
         }
     }
 
@@ -932,11 +966,14 @@ struct SnapshotCommand: ParsableCommand {
         session.interactiveSnapshot = interactive
         try store.save(session)
 
-        if globals.useJson {
-            print(SnapshotFormatter.formatJson(elements: elements))
+        let vpFieldSet = try resolveFieldSet()
+        if ndjson {
+            print(SnapshotFormatter.formatNdjson(elements: elements, fields: vpFieldSet))
+        } else if globals.useJson {
+            print(SnapshotFormatter.formatJson(elements: elements, fields: vpFieldSet))
         } else {
             print("Screenshot: \(screenshotPath)")
-            print(SnapshotFormatter.formatHuman(elements: elements))
+            print(SnapshotFormatter.formatHuman(elements: elements, fields: vpFieldSet))
             print("Note: vphone has no AX tree. Use click x y for coordinate-based interaction.")
         }
     }
@@ -955,10 +992,14 @@ struct PressCommand: ParsableCommand {
     @Flag(name: .long, help: "Use background PID delivery for CGEvent click fallback (no focus steal)")
     var background = false
 
+    @Flag(name: .long, help: "Prefer AXPress over coordinate click (legacy behavior)")
+    var preferAx = false
+
     struct PressResult: Codable {
         let pressed: String
         let success: Bool
         var delivery: String? = nil
+        var method: String? = nil
     }
 
     func run() throws {
@@ -976,6 +1017,25 @@ struct PressCommand: ParsableCommand {
             Output.printError(code: "ELEMENT_NOT_FOUND", message: "Element not found: \(ref)",
                             hint: "Re-run: agent-swift snapshot -i", useJson: globals.useJson)
             throw ExitCode(2)
+        }
+
+        // Dry-run: validate ref exists, report what would happen, skip action
+        if globals.dryRun {
+            struct DryRunResult: Codable {
+                let command: String
+                let ref: String
+                let dryRun: Bool
+                let refFound: Bool
+                let bounds: SessionData.RefEntry.Bounds?
+            }
+            let result = DryRunResult(command: "press", ref: ref, dryRun: true,
+                                       refFound: true, bounds: refEntry.bounds)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("[dry-run] Would press \(ref)")
+            }
+            return
         }
 
         if session.isVphoneMode {
@@ -1062,42 +1122,78 @@ struct PressCommand: ParsableCommand {
         }
 
         let target = elements[index]
-        var acted = AXClient.performPress(element: target, actionName: "AXPress")
-        if !acted {
-            acted = AXClient.performPress(element: target, actionName: "AXConfirm")
-        }
+        var acted = false
+        var pressMethod = "ax"
+        let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
 
-        if !acted {
+        // Default: prefer coordinate click (respects visual z-order for overlays)
+        // --prefer-ax: use AXPress first (legacy behavior)
+        if preferAx {
+            // Legacy: AXPress first, coordinate click fallback
+            acted = AXClient.performPress(element: target, actionName: "AXPress")
+            if !acted {
+                acted = AXClient.performPress(element: target, actionName: "AXConfirm")
+            }
+            pressMethod = "ax"
+
+            if !acted {
+                let tree = AXClient.walkTree(element: root)
+                let allNodes = AXClient.flattenTree(tree)
+                let nodes = useInteractive ? allNodes.filter { $0.isInteractive } : allNodes
+                if index < nodes.count, let pos = nodes[index].position, let sz = nodes[index].size {
+                    let center = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
+                    if useBackground, let wid = session.windowID, SkyLightBridge.shared.canPostToPid {
+                        let focusGuard = FocusGuard()
+                        acted = focusGuard.withSuppression(for: pid) {
+                            EventStamping.backgroundClick(at: center, pid: pid, windowID: CGWindowID(wid))
+                        }
+                        pressMethod = "background"
+                    } else {
+                        if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+                            app.activate()
+                            Thread.sleep(forTimeInterval: 0.1)
+                        }
+                        acted = AXClient.performClick(at: center)
+                        pressMethod = "click"
+                    }
+                }
+            }
+        } else {
+            // Default: coordinate click first (correct z-order for SwiftUI overlays)
             let tree = AXClient.walkTree(element: root)
             let allNodes = AXClient.flattenTree(tree)
             let nodes = useInteractive ? allNodes.filter { $0.isInteractive } : allNodes
             if index < nodes.count, let pos = nodes[index].position, let sz = nodes[index].size {
                 let center = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
-                let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
                 if useBackground, let wid = session.windowID, SkyLightBridge.shared.canPostToPid {
                     let focusGuard = FocusGuard()
                     acted = focusGuard.withSuppression(for: pid) {
                         EventStamping.backgroundClick(at: center, pid: pid, windowID: CGWindowID(wid))
                     }
+                    pressMethod = "background"
                 } else {
                     if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
                         app.activate()
                         Thread.sleep(forTimeInterval: 0.1)
                     }
                     acted = AXClient.performClick(at: center)
+                    pressMethod = "click"
                 }
+            }
+
+            // Fallback to AXPress if coordinate click failed (e.g., no bounds)
+            if !acted {
+                acted = AXClient.performPress(element: target, actionName: "AXPress")
+                if !acted {
+                    acted = AXClient.performPress(element: target, actionName: "AXConfirm")
+                }
+                pressMethod = "ax"
             }
         }
 
-        let deliveryMethod: String? = {
-            let useBackground = background || ProcessInfo.processInfo.environment["AGENT_SWIFT_BACKGROUND"] == "1"
-            if useBackground, session.windowID != nil, SkyLightBridge.shared.canPostToPid { return "background" }
-            return "ax"  // AXPress/AXConfirm is already background-safe
-        }()
-
         if acted {
             if globals.useJson {
-                print(Output.json(PressResult(pressed: ref, success: true, delivery: deliveryMethod)))
+                print(Output.json(PressResult(pressed: ref, success: true, delivery: useBackground ? "background" : "foreground", method: pressMethod)))
             } else {
                 print("Pressed \(ref)")
             }
@@ -1188,6 +1284,32 @@ struct FillCommand: ParsableCommand {
             Output.printError(code: "NOT_CONNECTED", message: "No active session",
                             hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
             throw ExitCode(2)
+        }
+
+        // Dry-run: validate ref exists, report what would happen, skip action
+        if globals.dryRun {
+            let refKey = ref.hasPrefix("@") ? String(ref.dropFirst()) : ref
+            guard let refEntry = session.refs[refKey] else {
+                Output.printError(code: "ELEMENT_NOT_FOUND", message: "Element not found: \(ref)",
+                                hint: "Re-run: agent-swift snapshot -i", useJson: globals.useJson)
+                throw ExitCode(2)
+            }
+            struct DryRunResult: Codable {
+                let command: String
+                let ref: String
+                let text: String
+                let dryRun: Bool
+                let refFound: Bool
+                let bounds: SessionData.RefEntry.Bounds?
+            }
+            let result = DryRunResult(command: "fill", ref: ref, text: text, dryRun: true,
+                                       refFound: true, bounds: refEntry.bounds)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("[dry-run] Would fill \(ref) with \"\(text)\"")
+            }
+            return
         }
 
         if session.isSimulatorMode, let udid = session.simulatorUDID {
@@ -1314,6 +1436,7 @@ struct GetCommand: ParsableCommand {
         let type: String
         let label: String?
         let identifier: String?
+        let help: String?
         let value: String?
         let enabled: Bool
         let focused: Bool
@@ -1361,6 +1484,13 @@ struct GetCommand: ParsableCommand {
             } else {
                 print(node.identifier ?? "")
             }
+        case "help":
+            let helpText = node.help
+            if globals.useJson {
+                print(Output.json(GetResult(ref: ref, property: "help", value: helpText)))
+            } else {
+                print(helpText ?? "")
+            }
         case "attrs":
             let attrs = AttrsResult(
                 ref: ref,
@@ -1368,6 +1498,7 @@ struct GetCommand: ParsableCommand {
                 type: node.displayType,
                 label: node.displayLabel,
                 identifier: node.identifier,
+                help: node.help,
                 value: node.value,
                 enabled: node.enabled,
                 focused: node.focused,
@@ -1381,6 +1512,7 @@ struct GetCommand: ParsableCommand {
                 print("type: \(node.displayType)")
                 if let label = node.displayLabel { print("label: \(label)") }
                 if let id = node.identifier { print("identifier: \(id)") }
+                if let hint = node.help { print("help: \(hint)") }
                 if let val = node.value { print("value: \(val)") }
                 print("enabled: \(node.enabled)")
                 print("focused: \(node.focused)")
@@ -1389,7 +1521,7 @@ struct GetCommand: ParsableCommand {
             }
         default:
             Output.printError(code: "INVALID_ARGS", message: "Unknown property: \(property)",
-                            hint: "Use: text, type, role, identifier, or attrs", useJson: globals.useJson)
+                            hint: "Use: text, type, role, identifier, help, or attrs", useJson: globals.useJson)
             throw ExitCode(2)
         }
     }
@@ -2065,6 +2197,23 @@ struct ScrollCommand: ParsableCommand {
             throw ExitCode(2)
         }
 
+        // Dry-run: validate target, report what would happen, skip action
+        if globals.dryRun {
+            struct DryRunResult: Codable {
+                let command: String
+                let target: String
+                let amount: Int
+                let dryRun: Bool
+            }
+            let result = DryRunResult(command: "scroll", target: target, amount: amount, dryRun: true)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("[dry-run] Would scroll \(target)")
+            }
+            return
+        }
+
         if session.isMirrorMode {
             try scrollMirror()
             return
@@ -2246,6 +2395,46 @@ struct ClickCommand: ParsableCommand {
             Output.printError(code: "NOT_CONNECTED", message: "No active session",
                             hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
             throw ExitCode(2)
+        }
+
+        // Dry-run: validate target, report what would happen, skip action
+        if globals.dryRun {
+            struct DryRunResult: Codable {
+                let command: String
+                let target: String
+                let dryRun: Bool
+                let targetValid: Bool
+                let bounds: SessionData.RefEntry.Bounds?
+            }
+            if target.hasPrefix("@") || target.hasPrefix("e") {
+                let refKey = target.hasPrefix("@") ? String(target.dropFirst()) : target
+                guard let refEntry = session.refs[refKey] else {
+                    Output.printError(code: "ELEMENT_NOT_FOUND", message: "Element not found: \(target)",
+                                    hint: "Re-run: agent-swift snapshot -i", useJson: globals.useJson)
+                    throw ExitCode(2)
+                }
+                let result = DryRunResult(command: "click", target: target, dryRun: true,
+                                           targetValid: true, bounds: refEntry.bounds)
+                if globals.useJson {
+                    print(Output.json(result))
+                } else {
+                    print("[dry-run] Would click \(target)")
+                }
+            } else {
+                guard let _ = Double(target), let _ = y else {
+                    Output.printError(code: "INVALID_INPUT", message: "Invalid click target: \(target)",
+                                    hint: "Use @eN for element ref or 'x y' for coordinates", useJson: globals.useJson)
+                    throw ExitCode(2)
+                }
+                let result = DryRunResult(command: "click", target: target, dryRun: true,
+                                           targetValid: true, bounds: nil)
+                if globals.useJson {
+                    print(Output.json(result))
+                } else {
+                    print("[dry-run] Would click at \(target), \(y!)")
+                }
+            }
+            return
         }
 
         if session.isVphoneMode {
@@ -2534,6 +2723,22 @@ struct TypeCommand: ParsableCommand {
             throw ExitCode(2)
         }
 
+        // Dry-run: validate session, report what would happen, skip action
+        if globals.dryRun {
+            struct DryRunResult: Codable {
+                let command: String
+                let text: String
+                let dryRun: Bool
+            }
+            let result = DryRunResult(command: "type", text: text, dryRun: true)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("[dry-run] Would type \"\(text)\"")
+            }
+            return
+        }
+
         if session.isSimulatorMode, let udid = session.simulatorUDID {
             try typeSimulator(udid: udid)
             return
@@ -2752,6 +2957,26 @@ struct SwipeCommand: ParsableCommand {
             Output.printError(code: "NOT_CONNECTED", message: "No active session",
                             hint: "Run: agent-swift connect --bundle-id <id>", useJson: globals.useJson)
             throw ExitCode(2)
+        }
+
+        // Dry-run: validate coordinates, report what would happen, skip action
+        if globals.dryRun {
+            struct DryRunResult: Codable {
+                let command: String
+                let from: [String: Double]
+                let to: [String: Double]
+                let dryRun: Bool
+            }
+            let result = DryRunResult(command: "swipe",
+                                       from: ["x": fromX, "y": fromY],
+                                       to: ["x": toX, "y": toY],
+                                       dryRun: true)
+            if globals.useJson {
+                print(Output.json(result))
+            } else {
+                print("[dry-run] Would swipe from (\(Int(fromX)), \(Int(fromY))) to (\(Int(toX)), \(Int(toY)))")
+            }
+            return
         }
 
         if session.isVphoneMode {
@@ -4539,21 +4764,26 @@ func allSchemas() -> [CommandSchema] { return [
             .init(name: "--nonzero-bounds", type: "bool", defaultValue: "false"),
             .init(name: "--role", type: "string", defaultValue: nil),
             .init(name: "--window-only", type: "bool", defaultValue: "false"),
+            .init(name: "--fields", type: "string", defaultValue: nil),
+            .init(name: "--ndjson", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
-    CommandSchema(name: "press", description: "Press element by ref",
+    CommandSchema(name: "press", description: "Press element by ref (uses coordinate click by default for correct overlay z-order; --prefer-ax for legacy AXPress behavior)",
         args: [.init(name: "ref", type: "string", required: true)],
         flags: [
             .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--prefer-ax", type: "bool", defaultValue: "false"),
+            .init(name: "--dry-run", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "fill", description: "Enter text into element by ref",
         args: [.init(name: "ref", type: "string", required: true), .init(name: "text", type: "string", required: true)],
         flags: [
             .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--dry-run", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
-    CommandSchema(name: "get", description: "Read element property by ref",
+    CommandSchema(name: "get", description: "Read element property by ref (properties: text, type, role, identifier, help, attrs)",
         args: [.init(name: "property", type: "string", required: true), .init(name: "ref", type: "string", required: true)],
         flags: [.init(name: "--json", type: "bool", defaultValue: "false")],
         exitCodes: ["0": "success", "2": "error"]),
@@ -4581,6 +4811,7 @@ func allSchemas() -> [CommandSchema] { return [
         flags: [
             .init(name: "--amount", type: "int", defaultValue: "5"),
             .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--dry-run", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "click", description: "Click element or coordinates via CGEvent",
@@ -4588,12 +4819,14 @@ func allSchemas() -> [CommandSchema] { return [
                .init(name: "y", type: "number", required: false)],
         flags: [
             .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--dry-run", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "type", description: "Type text into focused field",
         args: [.init(name: "text", type: "string", required: true)],
         flags: [
             .init(name: "--background", type: "bool", defaultValue: "false"),
+            .init(name: "--dry-run", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "swipe", description: "Swipe gesture by coordinates",
@@ -4603,6 +4836,7 @@ func allSchemas() -> [CommandSchema] { return [
                .init(name: "toY", type: "number", required: true)],
         flags: [
             .init(name: "--duration", type: "number", defaultValue: "0.3"),
+            .init(name: "--dry-run", type: "bool", defaultValue: "false"),
             .init(name: "--json", type: "bool", defaultValue: "false")
         ], exitCodes: ["0": "success", "2": "error"]),
     CommandSchema(name: "record", description: "Screen video recording (start/stop/frame/frames/status). Workflow: record stop → get videoPath → record frame --video <path> --at <seconds>. Use record frames for batch extraction with --every, --at, or --keyframes. Token optimization: --ocr for text extraction, --grayscale/--format jpeg for smaller files, --keyframes for scene-change detection.",
